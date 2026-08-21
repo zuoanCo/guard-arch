@@ -1,0 +1,51 @@
+# Model Router configuration: role -> provider/model/endpoint.
+# `api_key_env` names the environment variable that holds the API key.
+# Providers: openai (any OpenAI-compatible endpoint via base_url), anthropic, google, test.
+models:
+  default:
+    provider: openai
+    model: deepseek-chat
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+
+  reasoning:
+    provider: openai
+    model: deepseek-reasoner
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+
+  cheap:
+    provider: openai
+    model: qwen-turbo
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+
+  coding:
+    provider: anthropic
+    model: claude-sonnet-4-5
+    api_key_env: ANTHROPIC_API_KEY
+
+  # Keyless model for tests and smoke runs. Never calls tools.
+  test:
+    provider: test
+    output_text: "你好！我是 Guard Arch 助手（test 模式，由内置 TestModel 驱动，无需 API key）。我可以读写文件、执行命令、记住事实；配置真实模型后即可处理实际任务。"
+
+  # Keyless scripted model: calls read_file(README.md) then replies.
+  # Used for tool-flow smoke tests.
+  test-demo:
+    provider: test
+    script:
+      - tool: read_file
+        args:
+          path: README.md
+      - text: "已读取 README.md：这是 Guard Arch 项目，一个基于自研 Agent Runtime（PydanticAI 驱动）的 Claude Code 风格 CLI 工具。"
+
+  # Keyless scripted model: calls run_command("echo hello-from-tool") then replies.
+  # Used for permission-flow tests (ask -> deny / auto_approve -> allow).
+  test-shell:
+    provider: test
+    script:
+      - tool: run_command
+        args:
+          command: "echo hello-from-tool"
+      - text: "命令已执行。"

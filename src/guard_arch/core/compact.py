@@ -19,8 +19,10 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model
 
-# 历史估算 token 超过该值才触发压缩（与 context.py 相同的粗略启发：~4 字符/token）
+# 历史估算 token 达到该阈值即触发压缩（与 context.py 相同的粗略启发：~4 字符/token）
 DEFAULT_COMPACTION_THRESHOLD_TOKENS = 8_000
+# 触发比例：历史占用达到阈值的 90% 就先压缩，压缩完成后再继续执行本轮
+COMPACTION_TRIGGER_RATIO = 0.9
 # 压缩时保留末尾最近 N 条消息原文不动（保最近几轮的对话细节）
 DEFAULT_KEEP_RECENT_MESSAGES = 6
 
@@ -65,8 +67,12 @@ class HistoryCompactor:
         self.keep_recent = keep_recent
 
     def needs_compaction(self, history: list[ModelMessage]) -> bool:
-        """True when the rendered transcript exceeds the token threshold."""
-        return _approx_tokens(render_messages(history)) > self.threshold_tokens
+        """True when the rendered transcript reaches 90% of the token budget.
+
+        Compaction fires at COMPACTION_TRIGGER_RATIO (90%) of the threshold —
+        compress first, then continue the run, so context never overflows.
+        """
+        return _approx_tokens(render_messages(history)) >= self.threshold_tokens * COMPACTION_TRIGGER_RATIO
 
     async def compact(
         self, history: list[ModelMessage], model: Model

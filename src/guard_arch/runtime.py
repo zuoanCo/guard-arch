@@ -1,6 +1,7 @@
 """AgentRuntime: composes registries, memory, permissions, sandbox and the
 event bus, and drives the pydantic-ai agent loop."""
 
+import asyncio
 import functools
 import inspect
 import json
@@ -15,6 +16,7 @@ from pydantic_ai.messages import (
     ModelMessagesTypeAdapter,
     PartDeltaEvent,
     TextPartDelta,
+    ThinkingPartDelta,
 )
 from pydantic_ai.models import Model
 
@@ -26,6 +28,7 @@ from guard_arch.core.intake import analyze_request
 from guard_arch.core.memory import MemoryManager
 from guard_arch.core.model import ModelRouter
 from guard_arch.core.plan import TodoManager
+from guard_arch.core.question import QUESTION_TIMEOUT_SECONDS, QuestionManager
 from guard_arch.core.run import Run, RunManager, RunStatus
 from guard_arch.core.skill import SkillManifest, SkillRegistry
 from guard_arch.core.tool import Tool, ToolRegistry
@@ -79,6 +82,7 @@ class AgentRuntime:
         approval_handler=None,
         model_override: Model | None = None,
         compaction_threshold_tokens: int = DEFAULT_COMPACTION_THRESHOLD_TOKENS,
+        question_handler=None,
     ):
         self.workspace = Workspace(workspace)
         self.bus = event_bus or EventBus()
@@ -90,6 +94,10 @@ class AgentRuntime:
         self.run_manager = RunManager()
         # 会话级任务清单（agent 用 todo_write/todo_read 工具自己规划、追踪多步任务）
         self.todo_manager = TodoManager()
+        # 用户问答管理：ask_user_question 挂起 run 等待回答，回答后原 run 继续执行
+        self.question_manager = QuestionManager()
+        # CLI 交互式提问回调（(question) -> answer）；None 时走 Future 等待（API 模式）
+        self.question_handler = question_handler
         # 长会话历史压缩器：历史超过 token 阈值时把旧消息摘要化，保住上下文窗口
         self.compactor = HistoryCompactor(threshold_tokens=compaction_threshold_tokens)
         self.model_router = ModelRouter.from_file(
@@ -217,13 +225,26 @@ class AgentRuntime:
 
         async def ask_user_question(question: str) -> str:
             """Ask the user a question when you need their decision or missing
-            information to proceed. The question is delivered to the user; end your
-            turn after calling this and wait for the user's reply."""
-            await emit("user_question", {"question": question})
-            return (
-                "问题已转达给用户。请在本轮回复中直接向用户提出该问题，"
-                "等待用户回答后再继续后续工作。"
-            )
+            information to proceed. The run SUSPENDS until the user answers
+            (interactive handler in CLI, async answer injection in API mode),
+            then resumes with the answer — a real interactive step, not turn end."""
+            session_id = run.session_id
+            # CLI 模式：交互式处理器直接向用户提问并同步拿到回答
+            if self.question_handler is not None:
+                answer = self.question_handler(question)
+                if inspect.isawaitable(answer):
+                    answer = await answer
+                return f"用户回答：{answer}"
+            # API 模式：发 user_question 事件后挂起等待 answer_question() 注入回答
+            question_id, future = self.question_manager.create(session_id)
+            await emit("user_question", {"question": question, "question_id": question_id})
+            try:
+                answer = await asyncio.wait_for(future, timeout=QUESTION_TIMEOUT_SECONDS)
+            except TimeoutError:
+                self.question_manager.cancel(session_id)
+                return "Error: 用户长时间未回答；请自行决定下一步或在回复中说明需要该信息"
+            await emit("user_answered", {"question_id": question_id, "answer": answer})
+            return f"用户回答：{answer}"
 
         def list_capabilities() -> str:
             """List all capabilities available in this runtime: tools you can call,
@@ -488,11 +509,24 @@ class AgentRuntime:
 
         return emit
 
+    def answer_question(self, session_id: str, answer: str) -> bool:
+        """Inject the user's answer into a run suspended on ask_user_question.
+
+        Returns True if a pending question for the session was resolved.
+        """
+        return self.question_manager.answer(session_id, answer)
+
+    def has_pending_question(self, session_id: str) -> bool:
+        return self.question_manager.has_pending(session_id)
+
     def _stream_handler(self, run: Run, emit):
         async def handler(ctx, events) -> None:
             async for event in events:
                 if isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
                     await emit("message_delta", {"delta": event.delta.content_delta})
+                elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, ThinkingPartDelta):
+                    # 模型的分析思考过程（thinking 执行类型）作为独立事件下发
+                    await emit("thinking", {"delta": event.delta.content_delta})
 
         return handler
 

@@ -43,22 +43,19 @@ def make_runtime(workspace, **kwargs):
     )
 
 
-async def test_ask_user_question_emits_event_and_guides_model(workspace):
-    """ask_user_question: the question is delivered as a user_question event, and the
-    tool result guides the model to pose the question and wait for the user's reply."""
-    runtime = make_runtime(workspace)
+async def test_ask_user_question_via_interactive_handler(workspace):
+    """ask_user_question（交互模式）：question_handler 直接拿到回答回给模型。
+    挂起等待/API 回答注入的完整流程见 tests/test_question.py。"""
+    runtime = make_runtime(workspace, question_handler=lambda q: "侧重成本")
     events = []
     runtime.bus.subscribe("*", lambda e: events.append(e))
 
     result = await runtime.run("帮我规划一下", model_role="test-ask", session_id="m1")
 
     assert result.ok
-    # 用户问题经 user_question 事件下发（UI 可据此展示/收集用户输入）
-    questions = [e for e in events if e.type == "user_question"]
-    assert questions and questions[0].data["question"] == "你希望方案侧重成本还是速度？"
-    # 工具结果引导模型结束本轮、等用户回答（而非报错）
     results = [e for e in events if e.type == "tool_result" and e.data["tool"] == "ask_user_question"]
     assert results and results[0].data["ok"] is True
+    assert "侧重成本" in results[0].data["output"]
 
 
 async def test_list_capabilities_returns_runtime_inventory(workspace):

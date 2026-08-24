@@ -55,6 +55,8 @@
 | 任务清单（todo） | `core/plan.py` + 每 run 注入的 `todo_write`/`todo_read` 工具：agent 用 JSON 数组整体重写任务列表（pending/in_progress/completed），用于多步任务的规划与追踪；写入时发 `todo_updated` 事件 |
 | 会话压缩（compaction） | `core/compact.py`：run 前检查历史渲染文本的估算 token，超阈值（默认 8000，可经 `compaction_threshold_tokens` 配置）时由模型一次性摘要旧消息（保留末尾最近 6 条原文），压缩后历史 = 摘要消息 + 最近原文，发 `history_compacted` 事件 |
 | 需求分析门禁（intake） | `core/intake.py`：agent YAML 配 `intake: true` 后，每次 run 先做一次**结构化输出**模型调用（IntakeAnalysis：clarity/summary/questions/plan），runtime 按结果硬性分支——`needs_clarification` 则短路返回澄清问题、不启动主执行链路；`clear` 则正常执行。行为由架构流程控制而非提示词软约束 |
+| 元能力工具（meta tools） | 每 run 自动挂载（无需 YAML 声明）：`ask_user_question`（执行中需要用户决策/补充信息时向用户发问，发 `user_question` 事件）、`list_capabilities`（返回运行时能力清单：全部工具 + 已加载 skills + MCP 工具集，供模型规划执行链前盘点可用"肢体"） |
+| 基础能力集（base tools） | `runtime.BASE_TOOL_NAMES`：只读/低危原能力（read_file / list_directory / search_text / web_search / web_fetch / remember / recall_memory）每次 run 自动并入 agent 工具集，与 YAML 声明的工具去重合并；写文件/执行命令需显式声明且过权限门控 |
 
 ## 关键机制
 

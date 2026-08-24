@@ -40,7 +40,7 @@ async def test_intake_short_circuits_when_clarification_needed(workspace, monkey
     the clarifying questions become this turn's reply, main execution never starts."""
     from guard_arch.core.intake import IntakeAnalysis
 
-    async def fake_analyze(message, model):
+    async def fake_analyze(message, model, **kwargs):
         return IntakeAnalysis(
             clarity="needs_clarification",
             summary="用户想做方案但没说类型",
@@ -74,7 +74,7 @@ async def test_intake_proceeds_when_clear(workspace, monkeypatch):
     and the model's actual reply is returned."""
     from guard_arch.core.intake import IntakeAnalysis
 
-    async def fake_analyze(message, model):
+    async def fake_analyze(message, model, **kwargs):
         return IntakeAnalysis(
             clarity="clear",
             summary="写一首春天的诗",
@@ -100,7 +100,7 @@ async def test_agent_without_intake_skips_gate(workspace, monkeypatch):
     """Agents without `intake: true` never pay the extra analysis call."""
     called = []
 
-    async def fake_analyze(message, model):
+    async def fake_analyze(message, model, **kwargs):
         called.append(message)
         raise AssertionError("intake gate must not run for agents without intake: true")
 

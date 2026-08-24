@@ -62,6 +62,9 @@ def default_rules() -> list[PermissionRule]:
         PermissionRule(PermissionDecision.ALLOW, "read_file"),
         PermissionRule(PermissionDecision.ALLOW, "list_directory"),
         PermissionRule(PermissionDecision.ALLOW, "search_text"),
+        # Web access is read-only retrieval; allowed by default.
+        PermissionRule(PermissionDecision.ALLOW, "web_search"),
+        PermissionRule(PermissionDecision.ALLOW, "web_fetch"),
         # Writes are allowed inside the sandbox.
         PermissionRule(PermissionDecision.ALLOW, "write_file"),
         PermissionRule(PermissionDecision.ALLOW, "edit_file"),
@@ -71,6 +74,9 @@ def default_rules() -> list[PermissionRule]:
         PermissionRule(PermissionDecision.ALLOW, "todo_write"),
         PermissionRule(PermissionDecision.ALLOW, "todo_read"),
         PermissionRule(PermissionDecision.ALLOW, "dispatch_agent"),
+        # Meta capabilities: asking the user and listing the capability inventory.
+        PermissionRule(PermissionDecision.ALLOW, "ask_user_question"),
+        PermissionRule(PermissionDecision.ALLOW, "list_capabilities"),
         # Any other shell command needs confirmation.
         PermissionRule(PermissionDecision.ASK, "run_command"),
     ]

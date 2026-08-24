@@ -41,22 +41,41 @@ class IntakeAnalysis(BaseModel):
 
 
 _INTAKE_PROMPT = (
-    "You are the intake gate of an AI agent. Analyze the user's message and decide "
-    "whether the agent can act directly (clarity='clear') or must first ask the user "
-    "1-2 precise clarifying questions (clarity='needs_clarification'). "
-    "Only choose 'needs_clarification' when acting without the answer would risk "
-    "doing the wrong thing; never ask about trivial preferences. Be terse."
+    "You are the intake gate of an AI agent. You will receive the user's latest "
+    "message, optionally with recent conversation context and the agent's capability "
+    "list. Decide whether the agent can act directly (clarity='clear') or must first "
+    "ask the user 1-2 precise clarifying questions (clarity='needs_clarification').\n"
+    "Rules:\n"
+    "- If the need can be satisfied by the agent's capabilities (e.g. recalling memory, "
+    "searching the web, fetching a URL, managing a todo list), choose 'clear' and let "
+    "the agent act — never block a request the agent can handle with its tools.\n"
+    "- If recent context already answers the ambiguity, choose 'clear'.\n"
+    "- Only choose 'needs_clarification' when acting without the user's answer would "
+    "risk doing the wrong thing; never ask about trivial preferences. Be terse."
 )
 
 
-async def analyze_request(message: str, model: Model) -> IntakeAnalysis:
+async def analyze_request(
+    message: str,
+    model: Model,
+    *,
+    capabilities: str = "",
+    context: str = "",
+) -> IntakeAnalysis:
     """Run the structured intake analysis for one user message.
 
     Uses structured output (output_type=IntakeAnalysis), so the result is a
     validated typed object the runtime can branch on deterministically.
+    `capabilities` (tool names/descriptions) and `context` (recent conversation)
+    are provided so the gate doesn't block requests the agent could handle itself.
     """
+    parts = [f"User's latest message:\n{message}"]
+    if context:
+        parts.append(f"Recent conversation context:\n{context}")
+    if capabilities:
+        parts.append(f"Agent's available capabilities:\n{capabilities}")
     gate: Agent[None, IntakeAnalysis] = Agent(
         model, system_prompt=_INTAKE_PROMPT, output_type=IntakeAnalysis
     )
-    result = await gate.run(message)
+    result = await gate.run("\n\n".join(parts))
     return result.output

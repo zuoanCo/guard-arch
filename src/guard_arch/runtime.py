@@ -35,8 +35,22 @@ from guard_arch.mcp.client import MCPLoader
 from guard_arch.permissions.engine import PermissionDecision, PermissionEngine
 from guard_arch.tools.filesystem import make_filesystem_tools
 from guard_arch.tools.terminal import make_terminal_tools
+from guard_arch.tools.web import make_web_tools
 
 logger = logging.getLogger(__name__)
+
+# 基础能力集（base capabilities）：每次 run 自动并入 agent 的工具集，无需 YAML 声明。
+# 只读/低危能力铺满：工作区读取与搜索、联网搜索与抓取、长期记忆读写。
+# 写文件/改文件/执行命令不在基础集内——需在 agent YAML 显式声明且过权限门控。
+BASE_TOOL_NAMES = (
+    "read_file",
+    "list_directory",
+    "search_text",
+    "web_search",
+    "web_fetch",
+    "remember",
+    "recall_memory",
+)
 
 
 @dataclass
@@ -85,6 +99,7 @@ class AgentRuntime:
         for tool in (
             make_filesystem_tools(self.workspace)
             + make_terminal_tools(self.workspace)
+            + make_web_tools()
             + [self._make_remember_tool(), self._make_recall_tool()]
         ):
             self.tool_registry.register(tool)
@@ -132,7 +147,11 @@ class AgentRuntime:
         )
 
     def _resolve_tools(self, agent_def: AgentDefinition, skills: list[SkillManifest]) -> list[Tool]:
-        names: list[str] = list(agent_def.tools)
+        # 基础能力集自动并入（去重）：每个 agent 默认拥有只读/搜索/web/记忆等原能力
+        names: list[str] = list(BASE_TOOL_NAMES)
+        for name in agent_def.tools:
+            if name not in names:
+                names.append(name)
         for skill in skills:
             for name in skill.tools:
                 if name not in names:
@@ -179,6 +198,58 @@ class AgentRuntime:
                 todo_write,
             ),
             Tool("todo_read", "Read the session's current task list", todo_read),
+        ]
+
+    def _make_meta_tools(self, run: Run, emit) -> list[Tool]:
+        """Per-run meta capabilities: every agent gets these without YAML declaration.
+
+        - ask_user_question: mid-run channel back to the user when the agent needs
+          a decision or missing info (emits user_question event; the model should
+          pose the question in its reply and wait for the user's next message)
+        - list_capabilities: runtime inventory of the agent's "limbs" — all tools,
+          skills and MCP toolsets — so the model can check what's usable for the
+          problem at hand before planning the execution chain
+        """
+
+        async def ask_user_question(question: str) -> str:
+            """Ask the user a question when you need their decision or missing
+            information to proceed. The question is delivered to the user; end your
+            turn after calling this and wait for the user's reply."""
+            await emit("user_question", {"question": question})
+            return (
+                "问题已转达给用户。请在本轮回复中直接向用户提出该问题，"
+                "等待用户回答后再继续后续工作。"
+            )
+
+        def list_capabilities() -> str:
+            """List all capabilities available in this runtime: tools you can call,
+            skills (working methodologies) loaded, and MCP toolsets attached.
+            Use this to check what's available for the problem before planning."""
+            lines = ["## 工具（可直接调用解决子问题）"]
+            for t in self.tool_registry.all():
+                lines.append(f"- {t.name}: {t.description}")
+            skills = self.skill_registry.all()
+            if skills:
+                lines.append("## 技能（方法论/工作方式，按需遵循其指导）")
+                for s in skills:
+                    lines.append(f"- {s.name}: {s.description}")
+            if self.mcp_toolsets:
+                lines.append(f"## MCP 工具集（外部服务能力，已挂载 {len(self.mcp_toolsets)} 个）")
+            return "\n".join(lines)
+
+        return [
+            Tool(
+                "ask_user_question",
+                "Ask the user a question when you need their decision or missing "
+                "information to proceed with the task",
+                ask_user_question,
+            ),
+            Tool(
+                "list_capabilities",
+                "List all tools, skills and MCP toolsets available in this runtime; "
+                "use to check what's usable for the problem before planning execution",
+                list_capabilities,
+            ),
         ]
 
     def _make_dispatch_tool(self, parent_run: Run, emit) -> Tool:
@@ -280,7 +351,26 @@ class AgentRuntime:
             # 先做一次结构化分析调用，结果硬性分支执行路径——
             # 不清晰 → 短路返回澄清问题（不启动主执行链路）；清晰 → 正常执行
             if agent_def.intake:
-                analysis = await analyze_request(message, model)
+                # 门禁判断需知情：传入 agent 能力清单 + 最近对话上下文，
+                # 避免把"能用工具解决的需求"误判为需要澄清
+                history = self._load_history(session_id)
+                context = ""
+                if history:
+                    from guard_arch.core.compact import render_messages
+
+                    context = render_messages(history[-6:])
+                capabilities = "\n".join(
+                    f"- {t.name}: {t.description}"
+                    for t in [
+                        *tools,
+                        *self._make_todo_tools(session_id, emit),
+                        self._make_dispatch_tool(run, emit),
+                        *self._make_meta_tools(run, emit),
+                    ]
+                )
+                analysis = await analyze_request(
+                    message, model, capabilities=capabilities, context=context
+                )
                 await emit(
                     "intake_analyzed",
                     {
@@ -301,10 +391,12 @@ class AgentRuntime:
                     return RunResult(output=output, run=run)
             # 该 agent 本次 run 实际可用的全部工具：① agent/skills 声明的注册表工具
             # ② 会话级 todo 工具 ③ 子代理派发工具（dispatch_agent）
+            # ④ 元能力工具（ask_user_question / list_capabilities，每 run 自动挂载）
             run_tools = [
                 *tools,
                 *self._make_todo_tools(session_id, emit),
                 self._make_dispatch_tool(run, emit),
+                *self._make_meta_tools(run, emit),
             ]
             # system prompt 中注入能力面（工具清单），让模型知道自己"能做什么"
             system_prompt = self.context_engine.build_system_prompt(

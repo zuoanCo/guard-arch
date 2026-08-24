@@ -54,7 +54,7 @@ async def test_intake_short_circuits_when_clarification_needed(workspace, monkey
     events = []
     runtime.bus.subscribe("*", lambda e: events.append(e))
 
-    result = await runtime.run("帮我做个方案", agent_id="gated", session_id="i1")
+    result = await runtime.run("帮我做个方案，但是先别急着动手", agent_id="gated", session_id="i1")
 
     assert result.ok
     # 本轮回复就是澄清问题（而非主执行链路的输出）
@@ -92,7 +92,7 @@ async def test_intake_proceeds_when_clear(workspace, monkeypatch):
     events = []
     runtime.bus.subscribe("intake_analyzed", lambda e: events.append(e))
 
-    result = await runtime.run("写一首春天的诗", agent_id="gated", session_id="i2")
+    result = await runtime.run("帮我写一首关于春天景色的现代诗", agent_id="gated", session_id="i2")
 
     assert result.ok
     assert result.output == "执行完成"  # 主执行链路正常跑完（test 模型的固定回复）
@@ -120,3 +120,41 @@ async def test_agent_without_intake_skips_gate(workspace, monkeypatch):
     assert result.ok
     assert result.output == "执行完成"
     assert not called  # 未开启 intake 的 agent 不触发门禁调用
+
+
+async def test_short_message_skips_intake_gate(workspace, monkeypatch):
+    """Fast path: very short messages (greetings/acks) skip the intake gate entirely —
+    no extra model call, straight to the main run."""
+    called = []
+
+    async def fake_analyze(message, model, **kwargs):
+        called.append(message)
+        raise AssertionError("intake gate must not run for trivially short messages")
+
+    monkeypatch.setattr("guard_arch.runtime.analyze_request", fake_analyze)
+
+    runtime = make_runtime(workspace)
+    result = await runtime.run("你好", agent_id="gated", session_id="i4")
+
+    assert result.ok
+    assert result.output == "执行完成"
+    assert not called  # 短消息走快速通道，门禁未触发
+
+
+async def test_long_message_still_passes_intake_gate(workspace, monkeypatch):
+    """Messages longer than the fast-path threshold still go through the intake gate."""
+    from guard_arch.core.intake import IntakeAnalysis
+
+    called = []
+
+    async def fake_analyze(message, model, **kwargs):
+        called.append(message)
+        return IntakeAnalysis(clarity="clear", summary="x", questions=[], plan=[])
+
+    monkeypatch.setattr("guard_arch.runtime.analyze_request", fake_analyze)
+
+    runtime = make_runtime(workspace)
+    result = await runtime.run("帮我分析一下这个项目的技术选型是否合理", agent_id="gated", session_id="i5")
+
+    assert result.ok
+    assert called  # 长消息正常过门禁

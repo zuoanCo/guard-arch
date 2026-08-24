@@ -52,6 +52,10 @@ BASE_TOOL_NAMES = (
     "recall_memory",
 )
 
+# intake 门禁快速通道：消息短于该长度（打招呼/简短应答等）跳过门禁分析，
+# 直接进入主执行——简单消息不需要为"是否澄清"多付一次模型调用的延迟
+INTAKE_SKIP_MAX_CHARS = 12
+
 
 @dataclass
 class RunResult:
@@ -350,7 +354,8 @@ class AgentRuntime:
             # 需求分析门禁（agent YAML 里 intake: true 才启用）：
             # 先做一次结构化分析调用，结果硬性分支执行路径——
             # 不清晰 → 短路返回澄清问题（不启动主执行链路）；清晰 → 正常执行
-            if agent_def.intake:
+            # 快速通道：过短的消息（打招呼/简短应答）不存在歧义，跳过门禁省一次模型调用
+            if agent_def.intake and len(message.strip()) > INTAKE_SKIP_MAX_CHARS:
                 # 门禁判断需知情：传入 agent 能力清单 + 最近对话上下文，
                 # 避免把"能用工具解决的需求"误判为需要澄清
                 history = self._load_history(session_id)

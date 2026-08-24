@@ -67,6 +67,10 @@ async def test_intake_short_circuits_when_clarification_needed(workspace, monkey
     # 短路回复也会经 message_delta 事件下发（流式消费者能收到澄清问题文本）
     deltas = [e for e in events if e.type == "message_delta"]
     assert deltas and "你想做哪类方案？" in deltas[0].data["delta"]
+    # 短路轮次必须写入模型历史：否则被拦截的对话在后续轮次等于没发生过（agent 失忆）
+    history = runtime._load_history("i1")
+    assert history is not None and len(history) >= 2
+    assert any("你想做哪类方案？" in str(getattr(p, "content", "")) for m in history for p in m.parts)
 
 
 async def test_intake_proceeds_when_clear(workspace, monkeypatch):

@@ -384,8 +384,9 @@ class AgentRuntime:
                     output = "\n".join(analysis.questions)
                     # 短路路径的回复不经过模型流式输出，补发 message_delta 让流式消费者收到文本
                     await emit("message_delta", {"delta": output})
-                    self.memory.add_message(session_id, "user", message)
-                    self.memory.add_message(session_id, "assistant", output)
+                    # 短路轮次也必须写入模型历史（session_state），否则被拦截的对话
+                    # 在后续轮次的上下文中等于没发生过，agent 会"失忆"
+                    self._append_to_history(session_id, message, output)
                     self.run_manager.finish(run, RunStatus.SUCCEEDED, output=output)
                     await emit("agent_finished", {"output": output})
                     return RunResult(output=output, run=run)
@@ -446,6 +447,21 @@ class AgentRuntime:
         except Exception:  # noqa: BLE001 - corrupt history should not break a session
             logger.warning("discarding corrupt conversation state for session %r", session_id)
             return None
+
+    def _append_to_history(self, session_id: str, user_message: str, assistant_output: str) -> None:
+        """Append one user/assistant exchange to the session's model-message history.
+
+        Used by paths that bypass agent.run (e.g. intake-gate short-circuit) so the
+        exchange still appears in future turns' conversation context.
+        """
+        from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+
+        history = self._load_history(session_id) or []
+        history.append(ModelRequest(parts=[UserPromptPart(content=user_message)]))
+        history.append(ModelResponse(parts=[TextPart(content=assistant_output)]))
+        self.memory.save_conversation_state(
+            session_id, ModelMessagesTypeAdapter.dump_python(history)
+        )
 
     async def _maybe_compact_history(self, session_id, history, model, emit) -> list | None:
         """Compact an over-threshold history before the run (no-op when history is short)."""

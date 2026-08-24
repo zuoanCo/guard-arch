@@ -51,6 +51,13 @@ uv run python -m guard_arch --message "..." --model test
 
 工具调用时会显示状态行（如 `✓ read_file README.md`），危险命令被直接拒绝，普通 shell 命令会交互询问 y/n。
 
+每个 run 自动挂载三个内置工具（无需在 agent YAML 声明）：
+
+| 工具 | 说明 |
+| --- | --- |
+| `todo_write` / `todo_read` | 会话级任务清单：agent 规划多步任务时整体重写 todo 列表（pending/in_progress/completed） |
+| `dispatch_agent` | 子代理派发：把自包含子任务委托给另一个注册 agent，子代理隔离上下文独立运行、只回最终结论（不可嵌套派发） |
+
 ## API 服务（后台模式）
 
 ```powershell

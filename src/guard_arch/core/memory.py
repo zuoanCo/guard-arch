@@ -107,6 +107,29 @@ class MemoryManager:
         ).fetchall()
         return dict(rows)
 
+    def search(
+        self, query: str, layer: str | None = None, limit: int = 10
+    ) -> dict[str, dict[str, str]]:
+        """Keyword search over the kv memory layers (user/project/agent).
+
+        Matches entries whose key OR value contains `query` (SQL LIKE, case-insensitive
+        for ASCII). Returns {layer: {key: value}} for matching entries, most recently
+        updated first, capped at `limit` per layer. Empty dict when nothing matches.
+        """
+        layers = (layer,) if layer else ("user", "project", "agent")
+        like = f"%{query}%"
+        results: dict[str, dict[str, str]] = {}
+        for name in layers:
+            rows = self._conn.execute(
+                "SELECT key, value FROM kv WHERE layer = ? "
+                "AND (key LIKE ? OR value LIKE ?) "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (name, like, like, limit),
+            ).fetchall()
+            if rows:
+                results[name] = dict(rows)
+        return results
+
     def context_snippet(self, max_items_per_layer: int = 10) -> str:
         """Render user/project/agent memory for injection into the system prompt."""
         sections: list[str] = []

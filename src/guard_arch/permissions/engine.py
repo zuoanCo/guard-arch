@@ -66,6 +66,11 @@ def default_rules() -> list[PermissionRule]:
         PermissionRule(PermissionDecision.ALLOW, "write_file"),
         PermissionRule(PermissionDecision.ALLOW, "edit_file"),
         PermissionRule(PermissionDecision.ALLOW, "remember"),
+        PermissionRule(PermissionDecision.ALLOW, "recall_memory"),
+        # Agent self-management tools are safe: todo list and sub-agent dispatch.
+        PermissionRule(PermissionDecision.ALLOW, "todo_write"),
+        PermissionRule(PermissionDecision.ALLOW, "todo_read"),
+        PermissionRule(PermissionDecision.ALLOW, "dispatch_agent"),
         # Any other shell command needs confirmation.
         PermissionRule(PermissionDecision.ASK, "run_command"),
     ]

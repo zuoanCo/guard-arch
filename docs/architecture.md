@@ -46,11 +46,14 @@
 | 七、Terminal | `tools/terminal.py`：CommandPolicy=PermissionEngine，超时/输出截断，cwd 锁定 workspace |
 | 八、Sandbox | `core/workspace.py`：Workspace.resolve 强制路径在 workspace 根内（Phase 1 为本地沙箱，Run 级快照留待后续） |
 | 九、Permission | `permissions/engine.py`：规则表 allow/ask/deny，glob 匹配工具名 + 正则匹配参数；`--auto-approve` |
-| 十、Memory 四层 | `core/memory.py`：conversation（pydantic-ai 消息序列化 + 可读消息表）/ user / project / agent（kv），SQLite 持久化到 `workspace/.guard_arch/memory.db`；`remember` 工具供 agent 主动写入 |
+| 十、Memory 四层 | `core/memory.py`：conversation（pydantic-ai 消息序列化 + 可读消息表）/ user / project / agent（kv），SQLite 持久化到 `workspace/.guard_arch/memory.db`；`remember` 工具供 agent 主动写入，`recall_memory` 工具供 agent 按关键词主动检索三层 kv（命中按层分组返回，未命中返回友好提示）；注入 system prompt 的记忆仍按层截断（每层 10 条），超量记忆靠 agent 按需召回而非全量注入 |
 | 十一/十二、Context Engine | `core/context.py`：system prompt = base + agent instructions + skills + memory + environment，按 token 预算截断可选段 |
 | 十三/十四、Model Router | `core/model.py` + `config/models.yaml`：角色 → provider；openai 兼容 / anthropic / google / test；缺 key 报友好错误 |
 | 十五、Agent Loop | PydanticAI 负责底层 loop；Runtime 管 Task/Run/Context/Permission/Skill/Memory/Tool/事件/持久化 |
-| 十六、Event Bus | `events/bus.py`：同步+异步订阅，事件 agent_started / message_delta / tool_call / tool_result / permission_required / agent_finished / error |
+| 十六、Event Bus | `events/bus.py`：同步+异步订阅，事件 agent_started / message_delta / tool_call / tool_result / permission_required / agent_finished / error / todo_updated / subagent_started / subagent_finished |
+| 子代理（subagent） | `runtime.py` 的 `dispatch_agent` 工具：主代理可把自包含子任务派给注册表中的另一个 agent；子代理在隔离上下文（无父历史）中独立运行，仅最终文本结论返回主代理；子代理不可再派发（深度 1 上限），工具调用同样过权限与事件 |
+| 任务清单（todo） | `core/plan.py` + 每 run 注入的 `todo_write`/`todo_read` 工具：agent 用 JSON 数组整体重写任务列表（pending/in_progress/completed），用于多步任务的规划与追踪；写入时发 `todo_updated` 事件 |
+| 会话压缩（compaction） | `core/compact.py`：run 前检查历史渲染文本的估算 token，超阈值（默认 8000，可经 `compaction_threshold_tokens` 配置）时由模型一次性摘要旧消息（保留末尾最近 6 条原文），压缩后历史 = 摘要消息 + 最近原文，发 `history_compacted` 事件 |
 
 ## 关键机制
 

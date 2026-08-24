@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from guard_arch.core.agent import AgentDefinition
     from guard_arch.core.memory import MemoryManager
     from guard_arch.core.skill import SkillManifest
+    from guard_arch.core.tool import Tool
     from guard_arch.core.workspace import Workspace
 
 DEFAULT_TOKEN_BUDGET = 16_000
@@ -38,16 +39,29 @@ class ContextEngine:
         skills: list["SkillManifest"],
         memory: "MemoryManager",
         workspace: "Workspace",
+        tools: "list[Tool] | None" = None,
     ) -> str:
         base = (
             f"You are {agent.name}, an AI agent running inside Guard Arch.\n"
-            "You can use the provided tools to inspect and modify files inside the workspace, "
-            "run commands, and remember useful facts. All file paths are confined to the "
-            "workspace. Think step by step, prefer reading before writing, and verify changes."
+            "工作方式：先分析用户的真实需求——需求完整、目标明确时直接高效执行；"
+            "需求不完整、缺少关键信息或存在多种合理解读（分支）时，"
+            "先用一两个精准的问题与用户确认关键点，确认清楚后再行动，不要靠猜；"
+            "需要外部信息、执行动作或回忆事实时，主动使用下方列出的工具；"
+            "避免不必要的步骤和啰嗦，用尽量少的动作高效解决问题。"
         )
         sections: list[tuple[str, str]] = [("base", base)]
         if agent.instructions:
             sections.append(("instructions", agent.instructions.strip()))
+        # 能力面显性化：把该 agent 实际被授予的工具（名称+用途）注入 prompt，
+        # 模型据此知道自己"能做什么"，在需要时自主调用，而不是被裸问裸答
+        tool_lines = [f"- {t.name}: {t.description}" for t in (tools or [])]
+        if tool_lines:
+            sections.append(
+                (
+                    "tools",
+                    "## 你可用的工具（需要时主动调用，不要假装没有能力）\n" + "\n".join(tool_lines),
+                )
+            )
         for skill in skills:
             body = skill.instructions.strip()
             if body:

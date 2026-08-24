@@ -13,6 +13,9 @@ class AgentDefinition(BaseModel):
     skills: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)
     instructions: str = ""
+    # 需求分析门禁：开启后每次 run 先做一次结构化分析（core/intake.py），
+    # 需求不清晰时短路返回澄清问题，不进入主执行链路
+    intake: bool = False
 
 
 class AgentRegistry:

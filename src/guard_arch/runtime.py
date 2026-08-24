@@ -22,6 +22,7 @@ from guard_arch import PROJECT_ROOT
 from guard_arch.core.agent import AgentDefinition, AgentRegistry
 from guard_arch.core.compact import DEFAULT_COMPACTION_THRESHOLD_TOKENS, HistoryCompactor
 from guard_arch.core.context import ContextEngine
+from guard_arch.core.intake import analyze_request
 from guard_arch.core.memory import MemoryManager
 from guard_arch.core.model import ModelRouter
 from guard_arch.core.plan import TodoManager
@@ -226,7 +227,7 @@ class AgentRuntime:
         try:
             model = self.model_override or self.model_router.select(agent_def.model)
             system_prompt = self.context_engine.build_system_prompt(
-                agent_def, skills, self.memory, self.workspace
+                agent_def, skills, self.memory, self.workspace, tools=tools
             )
             agent: Agent[None, str] = Agent(
                 model,
@@ -274,8 +275,40 @@ class AgentRuntime:
         await emit("agent_started", {"agent": agent_def.id, "session": session_id})
         try:
             model = self.model_override or self.model_router.select(model_role or agent_def.model)
+
+            # 需求分析门禁（agent YAML 里 intake: true 才启用）：
+            # 先做一次结构化分析调用，结果硬性分支执行路径——
+            # 不清晰 → 短路返回澄清问题（不启动主执行链路）；清晰 → 正常执行
+            if agent_def.intake:
+                analysis = await analyze_request(message, model)
+                await emit(
+                    "intake_analyzed",
+                    {
+                        "clarity": analysis.clarity,
+                        "summary": analysis.summary,
+                        "questions": analysis.questions,
+                        "plan": analysis.plan,
+                    },
+                )
+                if analysis.clarity == "needs_clarification" and analysis.questions:
+                    output = "\n".join(analysis.questions)
+                    # 短路路径的回复不经过模型流式输出，补发 message_delta 让流式消费者收到文本
+                    await emit("message_delta", {"delta": output})
+                    self.memory.add_message(session_id, "user", message)
+                    self.memory.add_message(session_id, "assistant", output)
+                    self.run_manager.finish(run, RunStatus.SUCCEEDED, output=output)
+                    await emit("agent_finished", {"output": output})
+                    return RunResult(output=output, run=run)
+            # 该 agent 本次 run 实际可用的全部工具：① agent/skills 声明的注册表工具
+            # ② 会话级 todo 工具 ③ 子代理派发工具（dispatch_agent）
+            run_tools = [
+                *tools,
+                *self._make_todo_tools(session_id, emit),
+                self._make_dispatch_tool(run, emit),
+            ]
+            # system prompt 中注入能力面（工具清单），让模型知道自己"能做什么"
             system_prompt = self.context_engine.build_system_prompt(
-                agent_def, skills, self.memory, self.workspace
+                agent_def, skills, self.memory, self.workspace, tools=run_tools
             )
 
             agent: Agent[None, str] = Agent(
@@ -283,13 +316,6 @@ class AgentRuntime:
                 system_prompt=system_prompt,
                 toolsets=self.mcp_toolsets or None,
             )
-            # 注册三类工具：① agent/skills 声明的注册表工具 ② 会话级 todo 工具
-            # ③ 子代理派发工具（dispatch_agent，子代理隔离上下文跑完只回结论）
-            run_tools = [
-                *tools,
-                *self._make_todo_tools(session_id, emit),
-                self._make_dispatch_tool(run, emit),
-            ]
             for tool in run_tools:
                 agent.tool_plain(name=tool.name, description=tool.description)(
                     self._dispatch(tool, emit)

@@ -54,6 +54,7 @@
 | 子代理（subagent） | `runtime.py` 的 `dispatch_agent` 工具：主代理可把自包含子任务派给注册表中的另一个 agent；子代理在隔离上下文（无父历史）中独立运行，仅最终文本结论返回主代理；子代理不可再派发（深度 1 上限），工具调用同样过权限与事件 |
 | 任务清单（todo） | `core/plan.py` + 每 run 注入的 `todo_write`/`todo_read` 工具：agent 用 JSON 数组整体重写任务列表（pending/in_progress/completed），用于多步任务的规划与追踪；写入时发 `todo_updated` 事件 |
 | 会话压缩（compaction） | `core/compact.py`：run 前检查历史渲染文本的估算 token，超阈值（默认 8000，可经 `compaction_threshold_tokens` 配置）时由模型一次性摘要旧消息（保留末尾最近 6 条原文），压缩后历史 = 摘要消息 + 最近原文，发 `history_compacted` 事件 |
+| 需求分析门禁（intake） | `core/intake.py`：agent YAML 配 `intake: true` 后，每次 run 先做一次**结构化输出**模型调用（IntakeAnalysis：clarity/summary/questions/plan），runtime 按结果硬性分支——`needs_clarification` 则短路返回澄清问题、不启动主执行链路；`clear` 则正常执行。行为由架构流程控制而非提示词软约束 |
 
 ## 关键机制
 

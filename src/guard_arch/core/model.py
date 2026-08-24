@@ -60,12 +60,16 @@ class ModelRouter:
         return key
 
     def _build_openai(self, cfg: dict[str, Any]) -> Model:
-        from pydantic_ai.models.openai import OpenAIChatModel
+        from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
         from pydantic_ai.providers.openai import OpenAIProvider
 
         api_key = self._api_key(cfg, "OPENAI_API_KEY")
         provider = OpenAIProvider(base_url=cfg.get("base_url"), api_key=api_key)
-        return OpenAIChatModel(cfg["model"], provider=provider)
+        # 可选 extra_body：透传 provider 专有请求参数（如 MiMo 的 thinking 开关）
+        settings = None
+        if cfg.get("extra_body"):
+            settings = OpenAIChatModelSettings(extra_body=cfg["extra_body"])
+        return OpenAIChatModel(cfg["model"], provider=provider, settings=settings)
 
     def _build_anthropic(self, cfg: dict[str, Any]) -> Model:
         from pydantic_ai.models.anthropic import AnthropicModel

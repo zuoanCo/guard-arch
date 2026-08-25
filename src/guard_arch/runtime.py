@@ -31,6 +31,7 @@ from guard_arch.core.plan import TodoManager
 from guard_arch.core.question import QUESTION_TIMEOUT_SECONDS, QuestionManager
 from guard_arch.core.run import Run, RunManager, RunStatus
 from guard_arch.core.skill import SkillManifest, SkillRegistry
+from guard_arch.core.think import think as run_thinking
 from guard_arch.core.tool import Tool, ToolRegistry
 from guard_arch.core.workspace import Workspace
 from guard_arch.events.bus import Event, EventBus
@@ -372,6 +373,24 @@ class AgentRuntime:
         try:
             model = self.model_override or self.model_router.select(model_role or agent_def.model)
 
+            # 框架思考阶段（agent YAML 里 thinking: true 才启用）：
+            # 先让模型针对需求+能力面做一次分析（harness thinking，区别于模型内部思维链），
+            # 分析作为 thinking 事件下发，并注入主执行输入指导后续 tool_call/text
+            thinking_note = ""
+            if agent_def.thinking:
+                capabilities = "\n".join(f"- {t.name}: {t.description}" for t in tools)
+                context = ""
+                history = self._load_history(session_id)
+                if history:
+                    from guard_arch.core.compact import render_messages
+
+                    context = render_messages(history[-6:])
+                analysis = await run_thinking(
+                    message, model, capabilities=capabilities, context=context
+                )
+                await emit("thinking", {"delta": analysis})
+                thinking_note = analysis
+
             # 需求分析门禁（agent YAML 里 intake: true 才启用）：
             # 先做一次结构化分析调用，结果硬性分支执行路径——
             # 不清晰 → 短路返回澄清问题（不启动主执行链路）；清晰 → 正常执行
@@ -442,8 +461,14 @@ class AgentRuntime:
 
             history = self._load_history(session_id)
             history = await self._maybe_compact_history(session_id, history, model, emit)
+            # 有框架思考结论时注入主执行输入：思考阶段得出的方向指导执行链路
+            run_input = (
+                f"<harness_analysis>\n{thinking_note}\n</harness_analysis>\n\n{message}"
+                if thinking_note
+                else message
+            )
             result = await agent.run(
-                message,
+                run_input,
                 message_history=history,
                 event_stream_handler=self._stream_handler(run, emit),
             )

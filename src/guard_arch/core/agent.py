@@ -16,6 +16,9 @@ class AgentDefinition(BaseModel):
     # 需求分析门禁：开启后每次 run 先做一次结构化分析（core/intake.py），
     # 需求不清晰时短路返回澄清问题，不进入主执行链路
     intake: bool = False
+    # 框架思考阶段：开启后每次 run 先让模型分析需求（core/think.py），
+    # 分析作为 thinking 事件下发并注入主执行输入，指导后续 tool_call/text
+    thinking: bool = False
 
 
 class AgentRegistry:

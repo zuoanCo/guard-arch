@@ -1,147 +1,120 @@
 # Guard Arch
 
-对标 Claude Code 的 AI Agent 工具：核心是一套自研 **Agent Runtime**（以 PydanticAI 作为底层执行引擎），对外提供可直接使用的 CLI 对话工具。
+**English** | [中文](README.zh-CN.md)
 
-## 安装
+A Claude Code-style AI Agent framework: a self-hosted **Agent Runtime** (PydanticAI as the execution engine) with a production-grade harness around a custom model — ReAct agent loop, rich context management, tool interface, constraints, verification and error correction. Ships with a ready-to-use **CLI** and a **FastAPI service** (SSE streaming), and can be embedded as a library into any backend.
+
+## Architecture
+
+```text
+CLI (rich) / FastAPI (SSE) / embedded library
+        │
+AgentRuntime ── EventBus (typed events: thinking / tool_call / tool_retry /
+        │                tool_verified / message_delta / user_question / ...)
+        ├── AgentRegistry     agents/*.yaml       config-driven agent definitions
+        ├── SkillRegistry     skills/*/SKILL.md   frontmatter + markdown instructions
+        ├── ToolRegistry      native / MCP tools, unified Tool abstraction
+        ├── ModelRouter       config/models.yaml  role -> provider/model (+ extra_body)
+        ├── ContextEngine     layered system prompt with token budget
+        ├── MemoryManager     4-layer memory, sessions, compaction (SQLite)
+        ├── PermissionEngine  allow/ask/deny + LOW/MID/HIGH risk levels
+        ├── HistoryCompactor  compress at 90% of token budget, then continue
+        ├── QuestionManager   ask_user_question: suspend run, resume on answer
+        └── Workspace         sandboxed filesystem root
+        │
+PydanticAI (ReAct agent loop: model decides -> tool calls -> results fed back)
+        │
+OpenAI-compatible / Anthropic / Google / keyless TestModel
+```
+
+### The execution model (model + harness)
+
+Every run flows through typed execution phases, all emitted as events:
+
+| Phase | Event | What happens |
+| --- | --- | --- |
+| thinking | `thinking` | Harness makes the model analyze the request against capabilities & context, then guides execution (distinct from the model's internal reasoning) |
+| tool_call | `tool_call` / `tool_result` | Tools execute through the dispatch chain: event -> permission gate -> timeout+silent retry -> verify -> result |
+| text | `message_delta` | Incremental text output (streaming) |
+| askUserQuestion | `user_question` / `user_answered` | Real interaction: the run **suspends** until the user answers, then resumes with the answer |
+
+## Feature checklist
+
+**Context management** — what goes into each model request, in order: base operating principles -> agent instructions -> capability list (tool definitions) -> skills -> project instructions (workspace `GUARD.md`/`AGENTS.md`/`CLAUDE.md` auto-injected) -> memory -> environment state (time/OS/workspace). Token budget truncation + history compaction at 90%.
+
+**Tool interface** — filesystem (read/write/edit/list/search), terminal (run_command), web (`web_search` + `web_fetch`), memory (`remember`/`recall_memory`), MCP tools (`config/mcp.json`), plus per-run meta capabilities: `todo_write/read`, `dispatch_agent` (sub-agents in isolated context), `ask_user_question`, `list_capabilities`. Base read/search/web/memory tools are auto-included for every agent.
+
+**Constraints** — permission rules with **risk levels**: LOW (read-only, auto-allow) / MID (bounded side effects, ask) / HIGH (irreversible, e.g. `rm -rf`, `git push --force` — always denied, auto-approve can never override). Resource limits: per-tool execution timeout, concurrent-run semaphore. Fail-safe defaults: unknown tools are treated as MID + ASK.
+
+**Verification** — tool verifiers check the *result*, not the model's claim: e.g. `write_file`/`edit_file` re-read the file to confirm the write landed. `tool_verified` events; failures are annotated back into the tool output.
+
+**Error correction** — transient failures (network jitter / rate limit / timeout / 5xx) are **silently retried** (`Tool.retry_attempts`, linear backoff) with `tool_retry` events for observability; intermediate failure states never surface to the model.
+
+**Memory & sessions** — 4-layer memory (conversation/user/project/agent, SQLite at `workspace/.guard_arch/memory.db`), per-session model-history persistence, `list_sessions` with prefix scoping, long-term recall via `recall_memory`.
+
+## Install
 
 ```powershell
 uv sync
 ```
 
-## 配置模型
+## Configure models
 
-模型由 `config/models.yaml` 驱动，角色 → provider/model/base_url/api_key_env：
+Models are driven by `config/models.yaml` (role -> provider/model/base_url/api_key_env):
 
-| 角色 | provider | 模型 | API key 环境变量 |
+| Role | Provider | Model | API key env |
 | --- | --- | --- | --- |
-| default | openai 兼容 | deepseek-chat | `DEEPSEEK_API_KEY` |
-| reasoning | openai 兼容 | deepseek-reasoner | `DEEPSEEK_API_KEY` |
-| cheap | openai 兼容 | qwen-turbo | `DASHSCOPE_API_KEY` |
+| default | openai-compatible | deepseek-chat | `DEEPSEEK_API_KEY` |
+| reasoning | openai-compatible | deepseek-reasoner | `DEEPSEEK_API_KEY` |
+| cheap | openai-compatible | qwen-turbo | `DASHSCOPE_API_KEY` |
 | coding | anthropic | claude-sonnet-4-5 | `ANTHROPIC_API_KEY` |
-| test | 内置 TestModel | 无需 key | — |
-| test-demo | 内置脚本模型（先调 read_file 再回复） | 无需 key | — |
+| test | built-in TestModel | — | — |
 
-复制 `.env.example` 为 `.env` 并填入 key，或直接设置环境变量。缺 key 时会得到指出具体环境变量名的友好报错。
+Provider-specific request params (e.g. a thinking on/off switch) can be passed via `extra_body` in the role config. Copy `.env.example` to `.env` and fill in keys, or use `--model test` for a keyless run.
 
-## CLI 用法
-
-```powershell
-# 交互式对话（默认当前目录为 workspace）
-uv run guard
-
-# 非交互单轮
-uv run guard --message "你好，介绍一下你自己" --model test
-
-# 等价入口
-uv run python -m guard_arch --message "..." --model test
-```
-
-参数：
-
-| 参数 | 说明 |
-| --- | --- |
-| `--workspace <dir>` | 工作区根目录（默认 cwd），所有文件操作被沙箱限制在其中 |
-| `--agent <id>` | agent id（默认 `assistant`，定义见 `agents/*.yaml`） |
-| `--model <role>` | 覆盖模型角色（如 `default`/`test`/`test-demo`） |
-| `--session <id>` | 会话 id，对话历史按会话持久化，同 session 连续对话 |
-| `--auto-approve` | 自动允许所有权限请求（用于脚本） |
-| `--message <text>` | 非交互模式：跑一轮退出 |
-
-斜杠命令：`/help` `/model [role]` `/skills` `/agents` `/clear` `/exit`
-
-工具调用时会显示状态行（如 `✓ read_file README.md`），危险命令被直接拒绝，普通 shell 命令会交互询问 y/n。
-
-每个 run 自动挂载三个内置工具（无需在 agent YAML 声明）：
-
-| 工具 | 说明 |
-| --- | --- |
-| `todo_write` / `todo_read` | 会话级任务清单：agent 规划多步任务时整体重写 todo 列表（pending/in_progress/completed） |
-| `dispatch_agent` | 子代理派发：把自包含子任务委托给另一个注册 agent，子代理隔离上下文独立运行、只回最终结论（不可嵌套派发） |
-
-## API 服务（后台模式）
+## CLI
 
 ```powershell
-uv run guard-api                                              # 127.0.0.1:8100
-uv run uvicorn guard_arch.api.app:app --port 8100                  # 等效
+uv run guard                                   # interactive chat (workspace = cwd)
+uv run guard --message "hello" --model test    # single non-interactive turn
 ```
 
-端点：
+Options: `--workspace <dir>` (sandbox root), `--agent <id>`, `--model <role>`, `--session <id>` (persistent history), `--auto-approve`, `--message <text>`.
+Slash commands: `/help` `/model [role]` `/skills` `/agents` `/clear` `/exit`.
 
-| 方法 | 路径 | 说明 |
+Tool calls show status lines; dangerous commands are hard-denied; regular shell commands ask y/n.
+
+## API service
+
+```powershell
+uv run guard-api    # 127.0.0.1:8100
+```
+
+| Method | Path | Description |
 | --- | --- | --- |
-| GET | `/health` | 健康检查，返回 `{"ok": true}` |
-| GET | `/api/v1/agents` | agent 列表（id/name/model/skills/tools） |
-| GET | `/api/v1/skills` | skill 列表 |
-| POST | `/api/v1/sessions` | 创建会话 `{ "workspace?": "..." }` → `{ session_id }` |
-| GET | `/api/v1/sessions/{id}/messages` | 会话历史 `[{role, content}]` |
-| POST | `/api/v1/chat` | SSE 流式对话 |
+| GET | `/health` | Health check |
+| GET | `/api/v1/agents` | Agent list |
+| GET | `/api/v1/skills` | Skill list |
+| POST | `/api/v1/sessions` | Create session |
+| GET | `/api/v1/sessions/{id}/messages` | Session history |
+| POST | `/api/v1/chat` | SSE streaming chat |
 
-`/api/v1/chat` 请求体：`{ "session_id"?, "agent"?, "message", "workspace"?, "model"?, "auto_approve"? }`；省略 `session_id` 时自动新建并在首个事件（`agent_started`）的 data 里下发。SSE 事件与 EventBus 一一对应：`agent_started` / `message_delta` / `tool_call` / `tool_result` / `permission_required` / `agent_finished` / `error`，`agent_finished` 后流正常关闭。
+SSE events mirror the EventBus: `agent_started` / `thinking` / `message_delta` / `tool_call` / `tool_retry` / `tool_verified` / `tool_result` / `permission_required` / `user_question` / `user_answered` / `agent_finished` / `error`. In API mode ASK resolves to deny (event still emitted); `auto_approve: true` allows all except HIGH-risk deny rules.
 
-权限：API 模式无交互回调，`ask` 默认拒绝（仍会发 `permission_required` 事件供前端展示）；传 `auto_approve: true` 全部允许（开发便利，生产应接确认回调）；**deny 规则（如 `rm -rf`）不受 auto_approve 影响**。
+## Extend
 
-curl 示例：
+- **New agent**: add a YAML in `agents/` (id/name/model/skills/tools/instructions; optional `intake:` clarification gate, `thinking:` harness thinking phase)
+- **New skill**: add `skills/<name>/SKILL.md` (YAML frontmatter + markdown instructions)
+- **New tool**: wrap a typed function as `Tool(name, description, handler, timeout_seconds=, retry_attempts=, verifier=)` and register it; permission rules in `permissions/engine.py`
+- **MCP**: add `config/mcp.json` (Claude Desktop format); load failures degrade gracefully
 
-```powershell
-# 健康检查
-curl http://127.0.0.1:8100/health
-
-# SSE 流式对话（-N 关闭缓冲）
-curl -N -X POST http://127.0.0.1:8100/api/v1/chat `
-  -H "Content-Type: application/json" `
-  --data-binary '{\"message\": \"你好\", \"model\": \"test\", \"workspace\": \".\"}'
-
-# 创建会话并读取历史
-curl -X POST http://127.0.0.1:8100/api/v1/sessions -H "Content-Type: application/json" -d '{}'
-curl http://127.0.0.1:8100/api/v1/sessions/<session_id>/messages
-```
-
-## 架构
-
-```text
-CLI (rich)
-   │
-AgentRuntime ── EventBus ── (message_delta / tool_call / tool_result / permission_required / ...)
-   │
-   ├── AgentRegistry     agents/*.yaml          配置驱动的 Agent 定义
-   ├── SkillRegistry     skills/*/SKILL.md      frontmatter + Markdown instructions
-   ├── ToolRegistry      native/MCP 统一 Tool
-   ├── ModelRouter       config/models.yaml     角色 → pydantic-ai 模型
-   ├── ContextEngine     system prompt 组装 + token 预算
-   ├── MemoryManager     四层记忆，SQLite（workspace/.guard_arch/memory.db）
-   ├── PermissionEngine  allow / ask / deny 规则表
-   ├── SandboxManager    路径逃逸防护
-   └── RunManager        每次执行的 Run 记录
-   │
-PydanticAI Agent (agent loop, tool calls, streaming events)
-   │
-OpenAI 兼容 / Anthropic / Google / TestModel
-```
-
-详见 [docs/architecture.md](docs/architecture.md)。
-
-## 如何扩展
-
-**新增 Agent**：在 `agents/` 加一个 YAML：
-
-```yaml
-id: reviewer
-name: 代码审查员
-model: coding
-skills: [coding]
-tools: [read_file, search_text]
-instructions: 只读审查，不修改文件……
-```
-
-**新增 Skill**：在 `skills/<name>/SKILL.md` 写 YAML frontmatter（`name`/`description`/`tools`）+ Markdown instructions，然后在 agent YAML 的 `skills` 里引用。
-
-**新增 Tool**：写一个带类型签名的函数，包成 `Tool(name, description, handler)` 注册进 `ToolRegistry`（参考 `src/guard_arch/tools/filesystem.py`），再加入 agent 的 `tools` 列表。权限规则在 `permissions/engine.py` 的 `default_rules()` 中配置。
-
-**接入 MCP**：在 `config/mcp.json` 写 Claude Desktop 格式的 `mcpServers`；加载失败只记 warning，不影响启动。
-
-## 测试
+## Test
 
 ```powershell
-uv run pytest -q     # 全部使用 keyless test 模型
+uv run pytest -q     # keyless test models only
 uv run ruff check .
 ```
+
+## License
+
+See [LICENSE](LICENSE).

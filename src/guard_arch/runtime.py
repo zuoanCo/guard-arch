@@ -29,6 +29,7 @@ from guard_arch.core.memory import MemoryManager
 from guard_arch.core.model import ModelRouter
 from guard_arch.core.plan import TodoManager
 from guard_arch.core.question import QUESTION_TIMEOUT_SECONDS, QuestionManager
+from guard_arch.core.rules import RulesRegistry
 from guard_arch.core.run import Run, RunManager, RunStatus
 from guard_arch.core.skill import SkillManifest, SkillRegistry
 from guard_arch.core.think import think as run_thinking
@@ -78,6 +79,7 @@ class AgentRuntime:
         skills_dirs: list[str | Path] | None = None,
         models_config: str | Path | None = None,
         mcp_config: str | Path | None = None,
+        rules_config: str | Path | None = None,
         auto_approve: bool = False,
         event_bus: EventBus | None = None,
         approval_handler=None,
@@ -92,7 +94,11 @@ class AgentRuntime:
             auto_approve=auto_approve, approval_callback=approval_handler
         )
         self.memory = MemoryManager(self.workspace.root)
-        self.context_engine = ContextEngine()
+        # 核心行为规则：代码持有默认值，config/rules.yaml 可禁用/替换/追加
+        self.rules_registry = RulesRegistry(
+            rules_config or PROJECT_ROOT / "config" / "rules.yaml"
+        )
+        self.context_engine = ContextEngine(rules=self.rules_registry)
         self.run_manager = RunManager()
         # 会话级任务清单（agent 用 todo_write/todo_read 工具自己规划、追踪多步任务）
         self.todo_manager = TodoManager()

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from guard_arch.core.agent import AgentDefinition
     from guard_arch.core.memory import MemoryManager
+    from guard_arch.core.rules import RulesRegistry
     from guard_arch.core.skill import SkillManifest
     from guard_arch.core.tool import Tool
     from guard_arch.core.workspace import Workspace
@@ -25,8 +26,10 @@ WORKSPACE_INSTRUCTION_FILES = ("GUARD.md", "AGENTS.md", "CLAUDE.md")
 
 
 class ContextEngine:
-    def __init__(self, token_budget: int = DEFAULT_TOKEN_BUDGET):
+    def __init__(self, token_budget: int = DEFAULT_TOKEN_BUDGET, rules: "RulesRegistry | None" = None):
         self.token_budget = token_budget
+        # 核心行为规则（harness 宪法）：缺省用代码默认规则
+        self.rules = rules
 
     def workspace_instructions(self, workspace: "Workspace") -> str:
         """读取工作区根目录下的指令文件（GUARD.md/AGENTS.md/CLAUDE.md），合并为一段。"""
@@ -59,14 +62,12 @@ class ContextEngine:
         workspace: "Workspace",
         tools: "list[Tool] | None" = None,
     ) -> str:
-        base = (
-            f"You are {agent.name}, an AI agent running inside Guard Arch.\n"
-            "工作方式：先分析用户的真实需求——需求完整、目标明确时直接高效执行；"
-            "需求不完整、缺少关键信息或存在多种合理解读（分支）时，"
-            "先用一两个精准的问题与用户确认关键点，确认清楚后再行动，不要靠猜；"
-            "需要外部信息、执行动作或回忆事实时，主动使用下方列出的工具；"
-            "避免不必要的步骤和啰嗦，用尽量少的动作高效解决问题。"
-        )
+        # 核心行为规则来自 RulesRegistry（代码持有 + rules.yaml 可控），
+        # 与用户可编辑的 agent 人设（instructions）分层，不会被随手改掉
+        rules_text = self.rules.render() if self.rules is not None else ""
+        base = f"You are {agent.name}, an AI agent running inside Guard Arch.\n"
+        if rules_text:
+            base += f"核心行为规则（必须遵守）：\n{rules_text}"
         sections: list[tuple[str, str]] = [("base", base)]
         if agent.instructions:
             sections.append(("instructions", agent.instructions.strip()))

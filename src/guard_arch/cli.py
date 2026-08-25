@@ -40,6 +40,7 @@ HELP_TEXT = """\
 /new                  新建会话并切换过去
 /todos                查看当前会话的任务清单
 /runs                 查看最近的 run 记录（状态/输出）
+/rules                查看核心行为规则（harness 宪法，代码持有、rules.yaml 可控）
 /memory [layer]       查看长期记忆（user/project/agent，缺省看全部）
 /remember <层> <键> <值>  写入一条长期记忆
 /forget <层> <键>      删除一条长期记忆
@@ -126,6 +127,12 @@ def handle_slash_command(text: str, ctx: CLIContext) -> tuple[str, bool]:
             for r in runs
         ]
         return "\n".join(lines) or "(no runs)", False
+    if command == "/rules":
+        lines = []
+        for rule in ctx.runtime.rules_registry.all():
+            mark = "✓" if rule.enabled else "✗"
+            lines.append(f"{mark} [{rule.id}] {rule.text}")
+        return "\n".join(lines) or "(no rules)", False
     if command == "/memory":
         if arg:
             items = {arg: ctx.runtime.memory.recall(arg)}

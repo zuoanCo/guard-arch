@@ -134,6 +134,17 @@ def create_app() -> FastAPI:
             for t in runtime.tool_registry.all()
         ]
 
+    @app.get("/api/v1/rules")
+    async def list_rules(workspace: str | None = None) -> dict:
+        """核心行为规则清单（harness 宪法：代码持有默认值，rules.yaml 可控）。"""
+        runtime = server.get_runtime(workspace, auto_approve=False)
+        return {
+            "rules": [
+                {"id": r.id, "text": r.text, "enabled": r.enabled}
+                for r in runtime.rules_registry.all()
+            ]
+        }
+
     @app.get("/api/v1/models")
     async def list_models(workspace: str | None = None) -> dict:
         """可用模型角色列表（ModelRouter 配置的角色名）。"""

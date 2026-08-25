@@ -83,11 +83,16 @@ def make_web_tools() -> list[Tool]:
             "Search the web by keyword and get top results (title + url); use to find "
             "sources for external/realtime questions, then web_fetch the relevant page",
             web_search,
+            # 网络类工具：瞬时故障（抖动/限流）静默重试 2 次再暴露失败
+            retry_attempts=2,
+            timeout_seconds=25.0,
         ),
         Tool(
             "web_fetch",
             "Fetch a URL over HTTP(S) and return the response body as text; use to "
             "retrieve external or realtime information (public web pages or HTTP APIs)",
             web_fetch,
+            retry_attempts=2,
+            timeout_seconds=25.0,
         ),
     ]

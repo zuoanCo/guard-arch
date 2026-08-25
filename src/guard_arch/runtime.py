@@ -84,6 +84,7 @@ class AgentRuntime:
         model_override: Model | None = None,
         compaction_threshold_tokens: int = DEFAULT_COMPACTION_THRESHOLD_TOKENS,
         question_handler=None,
+        max_concurrent_runs: int = 4,
     ):
         self.workspace = Workspace(workspace)
         self.bus = event_bus or EventBus()
@@ -101,6 +102,8 @@ class AgentRuntime:
         self.question_handler = question_handler
         # 长会话历史压缩器：历史超过 token 阈值时把旧消息摘要化，保住上下文窗口
         self.compactor = HistoryCompactor(threshold_tokens=compaction_threshold_tokens)
+        # 资源限制：并发 run 上限（超出排队等待，防并发打爆模型额度/系统资源）
+        self._run_semaphore = asyncio.Semaphore(max_concurrent_runs)
         self.model_router = ModelRouter.from_file(
             models_config or PROJECT_ROOT / "config" / "models.yaml"
         )
@@ -370,6 +373,31 @@ class AgentRuntime:
         emit = self._emitter(run)
 
         await emit("agent_started", {"agent": agent_def.id, "session": session_id})
+        # 并发资源限制：超出 max_concurrent_runs 的 run 在此排队
+        async with self._run_semaphore:
+            return await self._run_inner(
+                message,
+                agent_def=agent_def,
+                skills=skills,
+                tools=tools,
+                run=run,
+                emit=emit,
+                session_id=session_id,
+                model_role=model_role,
+            )
+
+    async def _run_inner(
+        self,
+        message: str,
+        *,
+        agent_def: AgentDefinition,
+        skills: list[SkillManifest],
+        tools: list[Tool],
+        run: Run,
+        emit,
+        session_id: str,
+        model_role: str | None,
+    ) -> RunResult:
         try:
             model = self.model_override or self.model_router.select(model_role or agent_def.model)
 
@@ -555,17 +583,86 @@ class AgentRuntime:
 
         return handler
 
+    # -- 工具派发链：tool_call 事件 → 权限门控 → （超时+静默重试）执行 → 验证 → tool_result --
+
+    @staticmethod
+    def _is_transient_error(output: str) -> bool:
+        """判断工具失败是否瞬时故障（可静默重试）：网络抖动/限流/超时/5xx。"""
+        text = output.lower()
+        transient_markers = (
+            "timeout",
+            "timed out",
+            "connecterror",
+            "connection",
+            "429",
+            "rate limit",
+            "502",
+            "503",
+            "504",
+            "temporarily unavailable",
+        )
+        return any(marker in text for marker in transient_markers)
+
+    async def _execute_with_retry(self, tool: Tool, emit, call_id: str, *args, **kwargs) -> tuple[str, bool]:
+        """执行工具：超时限制 + 瞬时故障静默重试（确认失败才暴露给模型）。"""
+        attempts = 1 + max(0, tool.retry_attempts)
+        for attempt in range(1, attempts + 1):
+            try:
+                result = tool.handler(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    result = await asyncio.wait_for(result, timeout=tool.timeout_seconds)
+                output = str(result)
+                ok = not output.startswith("Error:")
+            except TimeoutError:
+                output, ok = f"Error: tool {tool.name} timed out after {tool.timeout_seconds}s", False
+            except Exception as exc:  # noqa: BLE001 - report to the model, don't crash
+                output, ok = f"Error: {type(exc).__name__}: {exc}", False
+
+            # 成功 / 非瞬时故障 / 重试已用尽：返回结果
+            if ok or not self._is_transient_error(output) or attempt == attempts:
+                return output, ok
+            # 瞬时故障：静默重试（发 tool_retry 事件供观测，不作为失败暴露）
+            await emit(
+                "tool_retry",
+                {"tool": tool.name, "call_id": call_id, "attempt": attempt, "next_in_seconds": attempt},
+            )
+            await asyncio.sleep(min(attempt, 5))  # 线性退避，上限 5s
+        return output, ok  # pragma: no cover
+
+    async def _verify_result(self, tool: Tool, emit, call_id: str, args: dict, output: str) -> str:
+        """验证阶段：运行工具的验证器检查执行结果（而非模型自述），发 tool_verified 事件。"""
+        if tool.verifier is None:
+            return output
+        try:
+            note = tool.verifier(args, output)
+            if inspect.isawaitable(note):
+                note = await note
+        except Exception as exc:  # noqa: BLE001 - 验证器异常不阻断，如实记录
+            note = f"验证器执行失败: {exc}"
+        if note:
+            await emit(
+                "tool_verified",
+                {"tool": tool.name, "call_id": call_id, "ok": False, "note": note},
+            )
+            return f"{output}\n[验证失败] {note}"
+        await emit("tool_verified", {"tool": tool.name, "call_id": call_id, "ok": True, "note": ""})
+        return output
+
     def _dispatch(self, tool: Tool, emit):
         engine = self.permission_engine
 
         async def dispatch(*args, **kwargs):
             call_id = uuid.uuid4().hex[:8]
-            await emit("tool_call", {"tool": tool.name, "args": kwargs, "call_id": call_id})
+            risk = engine.risk_of(tool.name, kwargs)
+            await emit(
+                "tool_call",
+                {"tool": tool.name, "args": kwargs, "call_id": call_id, "risk": str(risk)},
+            )
             decision = engine.decide(tool.name, kwargs)
             if decision is PermissionDecision.ASK:
                 await emit(
                     "permission_required",
-                    {"tool": tool.name, "args": kwargs, "call_id": call_id},
+                    {"tool": tool.name, "args": kwargs, "call_id": call_id, "risk": str(risk)},
                 )
             if not await engine.authorize(tool.name, kwargs):
                 output = f"Error: permission denied ({decision}) for tool {tool.name}"
@@ -574,14 +671,9 @@ class AgentRuntime:
                     {"tool": tool.name, "call_id": call_id, "ok": False, "output": output},
                 )
                 return output
-            try:
-                result = tool.handler(*args, **kwargs)
-                if inspect.isawaitable(result):
-                    result = await result
-                output = str(result)
-                ok = not output.startswith("Error:")
-            except Exception as exc:  # noqa: BLE001 - report to the model, don't crash
-                output, ok = f"Error: {type(exc).__name__}: {exc}", False
+            output, ok = await self._execute_with_retry(tool, emit, call_id, *args, **kwargs)
+            if ok:
+                output = await self._verify_result(tool, emit, call_id, kwargs, output)
             await emit(
                 "tool_result",
                 {"tool": tool.name, "call_id": call_id, "ok": ok, "output": output[:2000]},

@@ -85,10 +85,49 @@ def make_filesystem_tools(workspace: Workspace) -> list[Tool]:
                 return "\n".join(matches) + "\n... [truncated at 100 matches]"
         return "\n".join(matches) if matches else "(no matches)"
 
+    # 验证器：写操作完成后回读文件确认结果（验证执行结果，而非模型自述"写好了"）
+    def verify_write(args: dict, output: str) -> str | None:
+        if output.startswith("Error:"):
+            return None  # 写入本身失败，无需验证
+        path = args.get("path", "")
+        try:
+            resolved = workspace.resolve(path)
+            if not resolved.exists():
+                return f"文件 {path} 写入后不存在"
+            # 写入内容为空但文件非空（或反之）视为不一致
+            if args.get("content") is not None and resolved.read_text(encoding="utf-8") != args["content"]:
+                return f"文件 {path} 回读内容与写入不一致"
+        except (SandboxError, OSError, UnicodeDecodeError) as exc:
+            return f"回读验证失败: {exc}"
+        return None
+
+    def verify_edit(args: dict, output: str) -> str | None:
+        if output.startswith("Error:"):
+            return None
+        path = args.get("path", "")
+        try:
+            resolved = workspace.resolve(path)
+            text = resolved.read_text(encoding="utf-8")
+            if args.get("new_string") and args["new_string"] not in text:
+                return f"文件 {path} 中未找到替换后的内容"
+        except (SandboxError, OSError, UnicodeDecodeError) as exc:
+            return f"回读验证失败: {exc}"
+        return None
+
     return [
         Tool("read_file", "Read a UTF-8 text file inside the workspace", read_file),
-        Tool("write_file", "Write a UTF-8 text file inside the workspace", write_file),
-        Tool("edit_file", "Replace a string occurrence in a workspace file", edit_file),
+        Tool(
+            "write_file",
+            "Write a UTF-8 text file inside the workspace",
+            write_file,
+            verifier=verify_write,
+        ),
+        Tool(
+            "edit_file",
+            "Replace a string occurrence in a workspace file",
+            edit_file,
+            verifier=verify_edit,
+        ),
         Tool("list_directory", "List a workspace directory", list_directory),
         Tool("search_text", "Substring-search workspace files", search_text),
     ]

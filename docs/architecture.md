@@ -45,9 +45,10 @@
 | 六、Tool 系统 | `core/tool.py`（统一 Tool 抽象），Native 在 `tools/`，MCP 在 `mcp/client.py` |
 | 七、Terminal | `tools/terminal.py`：CommandPolicy=PermissionEngine，超时/输出截断，cwd 锁定 workspace |
 | 八、Sandbox | `core/workspace.py`：Workspace.resolve 强制路径在 workspace 根内（Phase 1 为本地沙箱，Run 级快照留待后续） |
-| 九、Permission | `permissions/engine.py`：规则表 allow/ask/deny，glob 匹配工具名 + 正则匹配参数；`--auto-approve` |
+| 九、Permission | `permissions/engine.py`：规则表 allow/ask/deny + **风险评级**（LOW 只读默认放行 / MID 有边界副作用默认询问或放行 / HIGH 不可逆高危永远拒绝，auto_approve 不可覆盖），glob 匹配工具名 + 正则匹配参数；未命中规则按 MID fail-safe |
+| 生产级加固 | **约束**：风险评级权限（上）+ 工具执行超时（`Tool.timeout_seconds`，超时按失败处理不拖死 run）+ 并发上限（`max_concurrent_runs` 信号量，超出排队）；**纠正**：瞬时故障（网络抖动/限流/超时/5xx）静默重试（`Tool.retry_attempts` 次，线性退避），发 `tool_retry` 事件供观测，确认失败才暴露给模型；**验证**：工具验证器（`Tool.verifier`，写操作回读确认结果而非模型自述），发 `tool_verified` 事件，验证失败附注回灌工具输出 |
 | 十、Memory 四层 | `core/memory.py`：conversation（pydantic-ai 消息序列化 + 可读消息表）/ user / project / agent（kv），SQLite 持久化到 `workspace/.guard_arch/memory.db`；`remember` 工具供 agent 主动写入，`recall_memory` 工具供 agent 按关键词主动检索三层 kv（命中按层分组返回，未命中返回友好提示）；注入 system prompt 的记忆仍按层截断（每层 10 条），超量记忆靠 agent 按需召回而非全量注入 |
-| 十一/十二、Context Engine | `core/context.py`：system prompt = base + agent instructions + skills + memory + environment，按 token 预算截断可选段 |
+| 十一/十二、Context Engine | `core/context.py`：system prompt = base + agent instructions + **能力清单（工具定义）** + skills + **项目指令（工作区 GUARD.md/AGENTS.md/CLAUDE.md 自动注入）** + memory + environment（时间/系统/工作区状态），按 token 预算截断可选段 |
 | 十三/十四、Model Router | `core/model.py` + `config/models.yaml`：角色 → provider；openai 兼容 / anthropic / google / test；缺 key 报友好错误 |
 | 十五、Agent Loop | PydanticAI 负责底层 loop；Runtime 管 Task/Run/Context/Permission/Skill/Memory/Tool/事件/持久化 |
 | 十六、Event Bus | `events/bus.py`：同步+异步订阅，事件 agent_started / message_delta / tool_call / tool_result / permission_required / agent_finished / error / todo_updated / subagent_started / subagent_finished |

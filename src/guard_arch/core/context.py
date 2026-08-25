@@ -20,9 +20,27 @@ def _approx_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+# 工作区指令文件：项目级约定（类似 CLAUDE.md），存在即注入 system prompt
+WORKSPACE_INSTRUCTION_FILES = ("GUARD.md", "AGENTS.md", "CLAUDE.md")
+
+
 class ContextEngine:
     def __init__(self, token_budget: int = DEFAULT_TOKEN_BUDGET):
         self.token_budget = token_budget
+
+    def workspace_instructions(self, workspace: "Workspace") -> str:
+        """读取工作区根目录下的指令文件（GUARD.md/AGENTS.md/CLAUDE.md），合并为一段。"""
+        parts: list[str] = []
+        for name in WORKSPACE_INSTRUCTION_FILES:
+            path = workspace.root / name
+            if path.is_file():
+                try:
+                    content = path.read_text(encoding="utf-8").strip()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if content:
+                    parts.append(f"[{name}]\n{content}")
+        return "\n\n".join(parts)
 
     def environment_info(self, workspace: "Workspace") -> str:
         return (
@@ -66,6 +84,10 @@ class ContextEngine:
             body = skill.instructions.strip()
             if body:
                 sections.append((f"skill:{skill.name}", f"## Skill: {skill.name}\n{body}"))
+        # 项目级指令（工作区指令文件）：团队/项目约定，优先级高于通用 base
+        workspace_text = self.workspace_instructions(workspace)
+        if workspace_text:
+            sections.append(("workspace", f"## Project Instructions\n{workspace_text}"))
         memory_text = memory.context_snippet()
         if memory_text:
             sections.append(("memory", f"## Memory\n{memory_text}"))

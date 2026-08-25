@@ -80,7 +80,19 @@ uv run guard --message "你好" --model test      # 非交互单轮
 ```
 
 参数：`--workspace <dir>`（沙箱根目录）、`--agent <id>`、`--model <role>`、`--session <id>`（同 session 连续对话）、`--auto-approve`、`--message <text>`。
-斜杠命令：`/help` `/model [role]` `/skills` `/agents` `/clear` `/exit`。
+
+斜杠命令：
+
+| 命令 | 说明 |
+| --- | --- |
+| `/help` | 显示帮助 |
+| `/model [role]` `/agent [id]` | 查看或切换模型角色 / agent |
+| `/workspace` | 显示工作区根目录 |
+| `/agents` `/skills` `/tools` | 列出 agents / skills / 工具 |
+| `/sessions` `/session <id>` `/new` | 会话列表 / 切换 / 新建 |
+| `/todos` `/runs` | 会话任务清单 / 最近 run 记录 |
+| `/memory [layer]` `/remember <层> <键> <值>` `/forget <层> <键>` | 查看 / 写入 / 删除长期记忆 |
+| `/clear` `/exit` | 清空当前会话历史 / 退出 |
 
 工具调用显示状态行；危险命令直接拒绝；普通 shell 命令交互询问 y/n。
 
@@ -95,9 +107,17 @@ uv run guard-api    # 127.0.0.1:8100
 | GET | `/health` | 健康检查 |
 | GET | `/api/v1/agents` | agent 列表 |
 | GET | `/api/v1/skills` | skill 列表 |
+| GET | `/api/v1/tools` | 工具清单（名称/描述/来源） |
+| GET | `/api/v1/models` | 可用模型角色 |
 | POST | `/api/v1/sessions` | 创建会话 |
+| GET | `/api/v1/sessions` | 会话列表（`like` 前缀过滤归属） |
 | GET | `/api/v1/sessions/{id}/messages` | 会话历史 |
+| GET | `/api/v1/sessions/{id}/todos` | 会话任务清单 |
+| DELETE | `/api/v1/sessions/{id}` | 删除会话 |
+| GET/POST/DELETE | `/api/v1/memory[/{layer}/{key}]` | 读取 / 写入 / 删除长期记忆 |
+| GET | `/api/v1/runs` `/api/v1/runs/{id}` | 最近 run 记录 / run 详情（含事件） |
 | POST | `/api/v1/chat` | SSE 流式对话 |
+| POST | `/api/v1/chat/answer` | 提交挂起提问的回答 |
 
 SSE 事件与 EventBus 一一对应：`agent_started` / `thinking` / `message_delta` / `tool_call` / `tool_retry` / `tool_verified` / `tool_result` / `permission_required` / `user_question` / `user_answered` / `agent_finished` / `error`。API 模式 ASK 默认拒绝（仍发事件供前端展示）；`auto_approve: true` 放行除 HIGH 高危外的全部操作。
 

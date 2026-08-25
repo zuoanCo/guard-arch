@@ -151,3 +151,91 @@ async def test_chat_auto_approve_allows_benign_command(client, tmp_path):
 async def test_unknown_session_messages_404(client):
     response = await client.get("/api/v1/sessions/s-nope/messages")
     assert response.status_code == 404
+
+
+# ---------- 补全端点：tools / models / sessions / memory / runs / answer / todos ----------
+
+async def test_list_tools(client, tmp_path):
+    response = await client.get("/api/v1/tools", params={"workspace": str(tmp_path)})
+    assert response.status_code == 200
+    names = {t["name"] for t in response.json()}
+    # 全局注册的工具都在（文件/终端/web/记忆）
+    assert {"read_file", "run_command", "web_search", "web_fetch", "remember"} <= names
+
+
+async def test_list_models(client, tmp_path):
+    response = await client.get("/api/v1/models", params={"workspace": str(tmp_path)})
+    assert response.status_code == 200
+    roles = response.json()["roles"]
+    assert "default" in roles and "test" in roles
+
+
+async def test_sessions_list_and_delete(client, tmp_path):
+    # 先聊一轮产生会话
+    events = await collect_sse(
+        client, "/api/v1/chat", {"workspace": str(tmp_path), "message": "hi", "model": "test"}
+    )
+    session_id = events[0]["data"]["session_id"]
+
+    listed = await client.get("/api/v1/sessions", params={"workspace": str(tmp_path)})
+    assert listed.status_code == 200
+    sessions = listed.json()["sessions"]
+    assert any(s["session_id"] == session_id for s in sessions)
+
+    deleted = await client.delete(f"/api/v1/sessions/{session_id}")
+    assert deleted.status_code == 200
+    listed2 = await client.get("/api/v1/sessions", params={"workspace": str(tmp_path)})
+    assert not any(s["session_id"] == session_id for s in listed2.json()["sessions"])
+
+
+async def test_memory_write_read_delete(client, tmp_path):
+    ws = str(tmp_path)
+    write = await client.post(
+        "/api/v1/memory", json={"layer": "user", "key": "偏好", "value": "深色模式", "workspace": ws}
+    )
+    assert write.status_code == 200
+
+    read = await client.get("/api/v1/memory", params={"layer": "user", "workspace": ws})
+    assert read.status_code == 200
+    assert read.json()["items"] == {"偏好": "深色模式"}
+
+    delete = await client.delete("/api/v1/memory/user/偏好", params={"workspace": ws})
+    assert delete.status_code == 200
+    assert delete.json()["deleted"] is True
+    read2 = await client.get("/api/v1/memory", params={"layer": "user", "workspace": ws})
+    assert read2.json()["items"] == {}
+
+
+async def test_runs_list_and_detail(client, tmp_path):
+    events = await collect_sse(
+        client, "/api/v1/chat", {"workspace": str(tmp_path), "message": "hi", "model": "test"}
+    )
+    run_id = events[0]["data"]["run_id"]
+
+    listed = await client.get("/api/v1/runs", params={"workspace": str(tmp_path)})
+    assert listed.status_code == 200
+    assert any(r["id"] == run_id for r in listed.json()["runs"])
+
+    detail = await client.get(f"/api/v1/runs/{run_id}", params={"workspace": str(tmp_path)})
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["status"] == "succeeded"
+    assert any(e["type"] == "agent_started" for e in body["events"])
+
+
+async def test_chat_answer_endpoint_no_pending(client, tmp_path):
+    """无挂起问题时 answer 返回 resumed=false（不报错）。"""
+    response = await client.post(
+        "/api/v1/chat/answer",
+        json={"session_id": "s-none", "answer": "x", "workspace": str(tmp_path)},
+    )
+    assert response.status_code == 200
+    assert response.json()["resumed"] is False
+
+
+async def test_session_todos_endpoint(client, tmp_path):
+    created = await client.post("/api/v1/sessions", json={"workspace": str(tmp_path)})
+    session_id = created.json()["session_id"]
+    response = await client.get(f"/api/v1/sessions/{session_id}/todos")
+    assert response.status_code == 200
+    assert response.json()["todos"] == []  # 新会话默认空清单

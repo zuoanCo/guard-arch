@@ -28,12 +28,23 @@ class CLIContext:
 
 
 HELP_TEXT = """\
-/help            显示帮助
-/model [role]    查看或切换模型角色（default/reasoning/cheap/coding/test/...）
-/skills          列出已加载的 skills
-/agents          列出已加载的 agents
-/clear           清空当前会话的对话历史
-/exit            退出
+/help                 显示帮助
+/model [role]         查看或切换模型角色
+/agent [id]           查看或切换 agent
+/workspace            显示当前工作区根目录
+/agents               列出已加载的 agents
+/skills               列出已加载的 skills
+/tools                列出已注册的工具
+/sessions             列出全部会话（最近活跃排序）
+/session <id>         切换到指定会话
+/new                  新建会话并切换过去
+/todos                查看当前会话的任务清单
+/runs                 查看最近的 run 记录（状态/输出）
+/memory [layer]       查看长期记忆（user/project/agent，缺省看全部）
+/remember <层> <键> <值>  写入一条长期记忆
+/forget <层> <键>      删除一条长期记忆
+/clear                清空当前会话的对话历史
+/exit                 退出
 """
 
 
@@ -74,6 +85,74 @@ def handle_slash_command(text: str, ctx: CLIContext) -> tuple[str, bool]:
             for a in ctx.runtime.agent_registry.all()
         ]
         return "\n".join(lines) or "(no agents)", False
+    if command == "/agent":
+        if not arg:
+            return f"当前 agent: {ctx.agent_id}", False
+        try:
+            ctx.runtime.agent_registry.get(arg)
+        except KeyError as exc:
+            return str(exc), False
+        ctx.agent_id = arg
+        return f"已切换 agent: {arg}", False
+    if command == "/workspace":
+        return f"工作区: {ctx.runtime.workspace.root}", False
+    if command == "/tools":
+        lines = [
+            f"- {t.name} [{t.source}]: {t.description}" for t in ctx.runtime.tool_registry.all()
+        ]
+        return "\n".join(lines) or "(no tools)", False
+    if command == "/sessions":
+        sessions = ctx.runtime.memory.list_sessions()
+        lines = [
+            f"- {s['session_id']} ({s['message_count']} 条, {s['last_active']}): {s['preview']}"
+            for s in sessions
+        ]
+        return "\n".join(lines) or "(no sessions)", False
+    if command == "/session":
+        if not arg:
+            return f"当前会话: {ctx.session_id}", False
+        ctx.session_id = arg
+        return f"已切换会话: {arg}", False
+    if command == "/new":
+        ctx.session_id = f"s-{uuid.uuid4().hex[:8]}"
+        return f"已新建会话: {ctx.session_id}", False
+    if command == "/todos":
+        return ctx.runtime.todo_manager.render(ctx.session_id), False
+    if command == "/runs":
+        runs = list(ctx.runtime.run_manager.runs.values())[-10:]
+        lines = [
+            f"- {r.id} [{r.status}] agent={r.agent_id} session={r.session_id} "
+            f"events={len(r.events)}"
+            for r in runs
+        ]
+        return "\n".join(lines) or "(no runs)", False
+    if command == "/memory":
+        if arg:
+            items = {arg: ctx.runtime.memory.recall(arg)}
+        else:
+            items = {layer: ctx.runtime.memory.recall(layer) for layer in ("user", "project", "agent")}
+        lines = []
+        for layer, kv in items.items():
+            if not kv:
+                continue
+            lines.append(f"[{layer}]")
+            lines.extend(f"- {k}: {v}" for k, v in kv.items())
+        return "\n".join(lines) or "(no memory)", False
+    if command == "/remember":
+        parts = arg.split(" ", 2)
+        if len(parts) < 3:
+            return "用法: /remember <layer> <key> <value>", False
+        try:
+            ctx.runtime.memory.remember(parts[0], parts[1], parts[2])
+        except ValueError as exc:
+            return str(exc), False
+        return f"已记住 [{parts[0]}] {parts[1]}", False
+    if command == "/forget":
+        parts = arg.split(" ", 1)
+        if len(parts) < 2:
+            return "用法: /forget <layer> <key>", False
+        removed = ctx.runtime.memory.forget(parts[0], parts[1])
+        return "已删除。" if removed else "没有找到该条记忆。", False
     if command == "/clear":
         ctx.runtime.memory.clear_conversation(ctx.session_id)
         return "对话历史已清空。", False
@@ -188,11 +267,21 @@ def main(argv: list[str] | None = None) -> int:
             pass
     args = build_parser().parse_args(argv)
     interactive = args.message is None
+
+    # CLI 交互模式下 ask_user_question 直接向用户提问并同步拿回答
+    def answer_question_interactively(question: str) -> str:
+        console.print(f"\n[bold yellow]? agent 提问[/bold yellow] {question}")
+        try:
+            return console.input("[bold blue]你的回答 ❯[/bold blue] ").strip() or "(用户未回答)"
+        except (EOFError, KeyboardInterrupt):
+            return "(用户取消回答)"
+
     try:
         runtime = AgentRuntime(
             Path(args.workspace),
             auto_approve=args.auto_approve,
             approval_handler=make_approval_handler(interactive),
+            question_handler=answer_question_interactively if interactive else None,
         )
     except ModelConfigError as exc:
         console.print(f"[red]配置错误: {exc}[/red]")

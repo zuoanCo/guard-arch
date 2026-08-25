@@ -80,7 +80,20 @@ uv run guard --message "hello" --model test    # single non-interactive turn
 ```
 
 Options: `--workspace <dir>` (sandbox root), `--agent <id>`, `--model <role>`, `--session <id>` (persistent history), `--auto-approve`, `--message <text>`.
-Slash commands: `/help` `/model [role]` `/skills` `/agents` `/clear` `/exit`.
+
+Slash commands:
+
+| Command | Description |
+| --- | --- |
+| `/help` | Show help |
+| `/model [role]` | Show or switch model role |
+| `/agent [id]` | Show or switch agent |
+| `/workspace` | Show workspace root |
+| `/agents` `/skills` `/tools` | List agents / skills / tools |
+| `/sessions` `/session <id>` `/new` | List sessions / switch / create |
+| `/todos` `/runs` | Session todo list / recent run records |
+| `/memory [layer]` `/remember <l> <k> <v>` `/forget <l> <k>` | Read / write / delete long-term memory |
+| `/clear` `/exit` | Clear current session history / quit |
 
 Tool calls show status lines; dangerous commands are hard-denied; regular shell commands ask y/n.
 
@@ -95,9 +108,17 @@ uv run guard-api    # 127.0.0.1:8100
 | GET | `/health` | Health check |
 | GET | `/api/v1/agents` | Agent list |
 | GET | `/api/v1/skills` | Skill list |
+| GET | `/api/v1/tools` | Tool registry (name/description/source) |
+| GET | `/api/v1/models` | Available model roles |
 | POST | `/api/v1/sessions` | Create session |
+| GET | `/api/v1/sessions` | List sessions (optional `like` prefix filter) |
 | GET | `/api/v1/sessions/{id}/messages` | Session history |
+| GET | `/api/v1/sessions/{id}/todos` | Session todo list |
+| DELETE | `/api/v1/sessions/{id}` | Delete session |
+| GET/POST/DELETE | `/api/v1/memory[/{layer}/{key}]` | Read / write / delete long-term memory |
+| GET | `/api/v1/runs` `/api/v1/runs/{id}` | Recent runs / run detail with events |
 | POST | `/api/v1/chat` | SSE streaming chat |
+| POST | `/api/v1/chat/answer` | Answer a suspended ask_user_question |
 
 SSE events mirror the EventBus: `agent_started` / `thinking` / `message_delta` / `tool_call` / `tool_retry` / `tool_verified` / `tool_result` / `permission_required` / `user_question` / `user_answered` / `agent_finished` / `error`. In API mode ASK resolves to deny (event still emitted); `auto_approve: true` allows all except HIGH-risk deny rules.
 

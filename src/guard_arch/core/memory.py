@@ -129,6 +129,14 @@ class MemoryManager:
         )
         self._conn.commit()
 
+    def forget(self, layer: str, key: str) -> bool:
+        """删除 kv 层中的一条记忆，返回是否删到了条目。"""
+        cursor = self._conn.execute(
+            "DELETE FROM kv WHERE layer = ? AND key = ?", (layer, key)
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
     def recall(self, layer: str, key: str | None = None) -> dict[str, str]:
         if key is not None:
             row = self._conn.execute(

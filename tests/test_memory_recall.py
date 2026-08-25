@@ -97,3 +97,21 @@ async def test_recall_memory_tool_no_match_returns_friendly_text(workspace):
     assert result.ok
     recall_results = [e for e in events if e.data["tool"] == "recall_memory"]
     assert recall_results and "no memory entries match" in recall_results[0].data["output"]
+
+
+def test_list_sessions_summary_and_prefix_filter(workspace):
+    """list_sessions：按最近活跃排序返回会话摘要（条数/预览），支持前缀过滤归属。"""
+    runtime = make_runtime(workspace)
+    runtime.memory.add_message("user-1-aaaa", "user", "你好")
+    runtime.memory.add_message("user-1-aaaa", "assistant", "你好，有什么可以帮你？")
+    runtime.memory.add_message("user-2-bbbb", "user", "另一个用户的会话")
+
+    # 前缀过滤：只看 user-1 的会话
+    sessions = runtime.memory.list_sessions(like="user-1-%")
+    assert len(sessions) == 1
+    assert sessions[0]["session_id"] == "user-1-aaaa"
+    assert sessions[0]["message_count"] == 2
+    assert "你好" in sessions[0]["preview"]
+
+    # 不过滤：两个会话都在
+    assert len(runtime.memory.list_sessions()) == 2

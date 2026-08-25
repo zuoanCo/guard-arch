@@ -61,6 +61,39 @@ class MemoryManager:
         ).fetchall()
         return [{"role": role, "content": content} for role, content in reversed(rows)]
 
+    def list_sessions(self, like: str | None = None) -> list[dict[str, Any]]:
+        """List conversation sessions with summary (id, message count, last activity, preview).
+
+        `like` optionally filters session ids with SQL LIKE (e.g. 'user-42-%' to scope
+        sessions belonging to one user). Most recently active session first.
+        """
+        query = (
+            "SELECT session_id, COUNT(*) AS msg_count, MAX(created_at) AS last_active "
+            "FROM conversation "
+        )
+        params: tuple = ()
+        if like:
+            query += "WHERE session_id LIKE ? "
+            params = (like,)
+        query += "GROUP BY session_id ORDER BY last_active DESC"
+        sessions: list[dict[str, Any]] = []
+        for session_id, msg_count, last_active in self._conn.execute(query, params).fetchall():
+            # 每个会话取最后一条消息做预览（截断 60 字符）
+            row = self._conn.execute(
+                "SELECT content FROM conversation WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            preview = (row[0][:60] + "…") if row and len(row[0]) > 60 else (row[0] if row else "")
+            sessions.append(
+                {
+                    "session_id": session_id,
+                    "message_count": msg_count,
+                    "last_active": last_active,
+                    "preview": preview,
+                }
+            )
+        return sessions
+
     def save_conversation_state(self, session_id: str, messages: Any) -> None:
         """Persist serialized pydantic-ai ModelMessages for a session."""
         payload = json.dumps(messages, ensure_ascii=False, default=str)

@@ -159,8 +159,10 @@ async def test_list_tools(client, tmp_path):
     response = await client.get("/api/v1/tools", params={"workspace": str(tmp_path)})
     assert response.status_code == 200
     names = {t["name"] for t in response.json()}
-    # 全局注册的工具都在（文件/终端/web/记忆）
-    assert {"read_file", "run_command", "web_search", "web_fetch", "remember"} <= names
+    # 全局注册的工具都在（文件/终端/web）；remember/recall_memory 是 per-run 会话级工具，
+    # 不在全局注册表（按用户隔离记忆）
+    assert {"read_file", "run_command", "web_search", "web_fetch"} <= names
+    assert "remember" not in names
 
 
 async def test_list_models(client, tmp_path):

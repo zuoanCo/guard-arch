@@ -24,7 +24,7 @@ def workspace(tmp_path):
     agents = tmp_path / "agents"
     agents.mkdir()
     (agents / "assistant.yaml").write_text(
-        "id: assistant\nname: Assistant\nmodel: test-plain\ntools: [recall_memory]\n",
+        "id: assistant\nname: Assistant\nmodel: test-plain\n",
         encoding="utf-8",
     )
     return tmp_path
@@ -71,9 +71,10 @@ def test_search_filters_by_layer(workspace):
 # ---------- recall_memory 工具（agent 主动按需召回记忆） ----------
 
 async def test_recall_memory_tool_returns_matching_entries(workspace):
-    """agent 调用 recall_memory 工具检索记忆：命中条目按层分组渲染返回给模型。"""
+    """agent 调用 recall_memory 工具检索记忆：命中条目按层分组渲染返回给模型。
+    记忆按用户隔离：recall 只返回 key 带当前会话作用域前缀（'r1:'）的条目。"""
     runtime = make_runtime(workspace)
-    runtime.memory.remember("user", "偏好-主题", "深色模式")
+    runtime.memory.remember("user", "r1:偏好-主题", "深色模式")
     events = []
     runtime.bus.subscribe("tool_result", lambda e: events.append(e))
 

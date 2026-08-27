@@ -171,15 +171,30 @@ class MemoryManager:
                 results[name] = dict(rows)
         return results
 
-    def context_snippet(self, max_items_per_layer: int = 10) -> str:
-        """Render user/project/agent memory for injection into the system prompt."""
+    def context_snippet(self, max_items_per_layer: int = 10, scope: str = "") -> str:
+        """Render user/project/agent memory for injection into the system prompt.
+
+        scope: optional prefix filter (e.g. 'user-42') — when set, only entries whose
+        key starts with '{scope}:' are included (the scope prefix is stripped from display).
+        Entries without a scope prefix (legacy/global) are excluded when scope is set.
+        """
         sections: list[str] = []
         for layer in ("user", "project", "agent"):
             items = self.recall(layer)
             if not items:
                 continue
+            filtered: dict[str, str] = {}
+            for k, v in items.items():
+                if scope:
+                    if k.startswith(f"{scope}:"):
+                        filtered[k[len(scope) + 1 :]] = v
+                    # 不带 scope 前缀的旧数据跳过（防止跨用户泄露）
+                else:
+                    filtered[k] = v
+            if not filtered:
+                continue
             lines = [f"[{layer} memory]"]
-            for key, value in list(items.items())[:max_items_per_layer]:
+            for key, value in list(filtered.items())[:max_items_per_layer]:
                 lines.append(f"- {key}: {value}")
             sections.append("\n".join(lines))
         return "\n\n".join(sections)

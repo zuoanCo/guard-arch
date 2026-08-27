@@ -3,32 +3,78 @@
 When the agent calls ask_user_question mid-run, the tool suspends the run on an
 asyncio.Future until the user's answer arrives (via `answer()` from an API layer
 or an interactive handler from the CLI), then the run resumes with the answer.
+
+Supports structured questions: multiple questions, each with selectable options,
+single/multi select mode, and custom answer support.
 """
 
 import asyncio
+import json
 import uuid
+from dataclasses import dataclass, field
+from typing import Any
 
-# 等待用户回答的超时：超时后工具返回错误文本，agent 自行决定下一步（不等死）
+# 等待用户回答的超时：超时后 agent 自行决定下一步（不等死）
 QUESTION_TIMEOUT_SECONDS = 300.0
+
+
+@dataclass
+class QuestionItem:
+    """A single structured question with options."""
+
+    question: str
+    options: list[str] = field(default_factory=list)
+    question_type: str = "single"  # "single" | "multi"
+
+
+@dataclass
+class PendingQuestion:
+    """A pending question set waiting for user answer."""
+
+    question_id: str
+    questions: list[QuestionItem]
+    future: asyncio.Future
 
 
 class QuestionManager:
     """Tracks at most one pending question per session."""
 
     def __init__(self) -> None:
-        # session_id -> (question_id, Future[str])
-        self._pending: dict[str, tuple[str, asyncio.Future]] = {}
+        self._pending: dict[str, PendingQuestion] = {}
 
-    def create(self, session_id: str) -> tuple[str, asyncio.Future]:
-        """Register a new pending question for the session; returns (question_id, future)."""
+    def create(
+        self,
+        session_id: str,
+        questions: list[dict[str, Any]] | None = None,
+    ) -> tuple[str, asyncio.Future]:
+        """Register a new pending question for the session; returns (question_id, future).
+
+        questions: list of {question: str, options: list[str], question_type: str}
+        """
         question_id = f"q-{uuid.uuid4().hex[:8]}"
         future: asyncio.Future = asyncio.get_event_loop().create_future()
-        self._pending[session_id] = (question_id, future)
+
+        items: list[QuestionItem] = []
+        if questions:
+            for q in questions:
+                items.append(
+                    QuestionItem(
+                        question=q.get("question", ""),
+                        options=q.get("options", []),
+                        question_type=q.get("question_type", "single"),
+                    )
+                )
+
+        self._pending[session_id] = PendingQuestion(
+            question_id=question_id,
+            questions=items,
+            future=future,
+        )
         return question_id, future
 
     def has_pending(self, session_id: str) -> bool:
         entry = self._pending.get(session_id)
-        return entry is not None and not entry[1].done()
+        return entry is not None and not entry.future.done()
 
     def answer(self, session_id: str, answer: str) -> bool:
         """Resolve the session's pending question with the user's answer.
@@ -38,10 +84,9 @@ class QuestionManager:
         entry = self._pending.pop(session_id, None)
         if entry is None:
             return False
-        _question_id, future = entry
-        if future.done():
+        if entry.future.done():
             return False
-        future.set_result(answer)
+        entry.future.set_result(answer)
         return True
 
     def cancel(self, session_id: str) -> None:

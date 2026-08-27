@@ -71,6 +71,6 @@ async def test_list_capabilities_returns_runtime_inventory(workspace):
     list_results = [e for e in events if e.data["tool"] == "list_capabilities"]
     assert list_results and list_results[0].data["ok"] is True
     output = list_results[0].data["output"]
-    # 清单包含全局注册的工具（文件/终端/web/记忆等），供模型规划执行链
+    # 清单包含全局注册的工具（文件/终端/web 等），供模型规划执行链；
+    # remember/recall_memory 是 per-run 会话级工具，不在全局注册表（按用户隔离记忆）
     assert "web_fetch" in output
-    assert "remember" in output

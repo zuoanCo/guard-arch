@@ -61,6 +61,7 @@ class ContextEngine:
         memory: "MemoryManager",
         workspace: "Workspace",
         tools: "list[Tool] | None" = None,
+        memory_scope: str = "",
     ) -> str:
         # 核心行为规则来自 RulesRegistry（代码持有 + rules.yaml 可控），
         # 与用户可编辑的 agent 人设（instructions）分层，不会被随手改掉
@@ -89,7 +90,7 @@ class ContextEngine:
         workspace_text = self.workspace_instructions(workspace)
         if workspace_text:
             sections.append(("workspace", f"## Project Instructions\n{workspace_text}"))
-        memory_text = memory.context_snippet()
+        memory_text = memory.context_snippet(scope=memory_scope)
         if memory_text:
             sections.append(("memory", f"## Memory\n{memory_text}"))
         sections.append(

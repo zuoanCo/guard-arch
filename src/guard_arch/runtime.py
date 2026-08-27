@@ -53,8 +53,7 @@ BASE_TOOL_NAMES = (
     "search_text",
     "web_search",
     "web_fetch",
-    "remember",
-    "recall_memory",
+    # remember/recall_memory 从基础集移除 — 改为 per-run 创建（按用户隔离记忆）
 )
 
 # intake 门禁快速通道：消息短于该长度（打招呼/简短应答等）跳过门禁分析，
@@ -122,49 +121,70 @@ class AgentRuntime:
             make_filesystem_tools(self.workspace)
             + make_terminal_tools(self.workspace)
             + make_web_tools()
-            + [self._make_remember_tool(), self._make_recall_tool()]
         ):
             self.tool_registry.register(tool)
+        # remember/recall 从全局注册表移除 — 改为 per-run 创建（按 session_id 隔离记忆）
 
         mcp_path = mcp_config or PROJECT_ROOT / "config" / "mcp.json"
         self.mcp_toolsets = MCPLoader(mcp_path, self.permission_engine).load_toolsets()
 
     # -- tools ---------------------------------------------------------------
 
-    def _make_remember_tool(self) -> Tool:
+    @staticmethod
+    def _user_scope(session_id: str) -> str:
+        """从 session_id 中提取用户作用域前缀（如 'user-42'）。
+        session_id 格式: user-{user_id}-{uuid} → 取 'user-{user_id}' 部分。"""
+        parts = session_id.split("-", 2)
+        if len(parts) >= 2 and parts[0] == "user":
+            return f"user-{parts[1]}"
+        return session_id
+
+    def _make_remember_tool(self, session_id: str) -> Tool:
         memory = self.memory
+        scope = self._user_scope(session_id)
 
         def remember(layer: str, key: str, value: str) -> str:
-            """Store a durable fact. layer: 'user', 'project' or 'agent'."""
+            """Store a durable fact. layer: 'user', 'project' or 'agent'.
+            Memory is scoped to the current user — other users cannot see it."""
+            scoped_key = f"{scope}:{key}"
             try:
-                memory.remember(layer, key, value)
+                memory.remember(layer, scoped_key, value)
             except ValueError as exc:
                 return f"Error: {exc}"
             return f"remembered [{layer}] {key}"
 
-        return Tool("remember", "Store a durable fact in user/project/agent memory", remember)
+        return Tool("remember", "Store a durable fact in user/project/agent memory (scoped to current user)", remember)
 
-    def _make_recall_tool(self) -> Tool:
+    def _make_recall_tool(self, session_id: str) -> Tool:
         memory = self.memory
+        scope = self._user_scope(session_id)
 
         def recall_memory(query: str, layer: str = "") -> str:
             """Search durable memory by keyword. query: keyword to match against memory
             keys/values. layer: optional, one of 'user'/'project'/'agent'; leave empty
-            to search all layers. Returns matching entries grouped by layer."""
+            to search all layers. Returns matching entries grouped by layer.
+            Only returns memory belonging to the current user."""
             matches = memory.search(query, layer or None)
             if not matches:
                 return f"no memory entries match {query!r}"
             lines: list[str] = []
             for name, items in matches.items():
-                lines.append(f"[{name} memory]")
-                for key, value in items.items():
-                    lines.append(f"- {key}: {value}")
-            return "\n".join(lines)
+                filtered = {}
+                for k, v in items.items():
+                    # 只返回当前用户的记忆（key 以 scope: 开头）
+                    if k.startswith(f"{scope}:"):
+                        filtered[k[len(scope) + 1 :]] = v
+                if filtered:
+                    lines.append(f"[{name} memory]")
+                    for key, value in filtered.items():
+                        lines.append(f"- {key}: {value}")
+            return "\n".join(lines) if lines else f"no memory entries match {query!r}"
 
         return Tool(
             "recall_memory",
             "Search durable memory (user/project/agent layers) by keyword; use to "
-            "recall facts beyond what was auto-injected into the system prompt",
+            "recall facts beyond what was auto-injected into the system prompt. "
+            "Only returns memory belonging to the current user.",
             recall_memory,
         )
 
@@ -233,12 +253,31 @@ class AgentRuntime:
           problem at hand before planning the execution chain
         """
 
-        async def ask_user_question(question: str) -> str:
-            """Ask the user a question when you need their decision or missing
-            information to proceed. The run SUSPENDS until the user answers
-            (interactive handler in CLI, async answer injection in API mode),
-            then resumes with the answer — a real interactive step, not turn end."""
+        async def ask_user_question(
+            question: str,
+            questions_json: str = "[]",
+        ) -> str:
+            """Ask the user structured questions when you need their decision or
+            missing information to proceed.
+
+            - question: 主问题/说明文字（必填）
+            - questions_json: JSON array of structured sub-questions, each with:
+                - question (str): the question text
+                - options (list[str]): 2-4 selectable options
+                - question_type (str): "single" or "multi" (default "single")
+
+            Example: '[{"question":"您倾向哪种风格？","options":["简约","科技","自然"],"question_type":"single"}]'
+
+            The run SUSPENDS until the user answers (selects options or types custom answer),
+            then resumes with the answer.
+            """
             session_id = run.session_id
+            # 解析结构化问题列表
+            try:
+                questions_list = json.loads(questions_json) if questions_json else []
+            except (json.JSONDecodeError, TypeError):
+                questions_list = []
+
             # CLI 模式：交互式处理器直接向用户提问并同步拿到回答
             if self.question_handler is not None:
                 answer = self.question_handler(question)
@@ -246,13 +285,27 @@ class AgentRuntime:
                     answer = await answer
                 return f"用户回答：{answer}"
             # API 模式：发 user_question 事件后挂起等待 answer_question() 注入回答
-            question_id, future = self.question_manager.create(session_id)
-            await emit("user_question", {"question": question, "question_id": question_id})
+            question_id, future = self.question_manager.create(
+                session_id, questions=questions_list
+            )
+            await emit(
+                "user_question",
+                {
+                    "question": question,
+                    "question_id": question_id,
+                    "questions": questions_list,
+                },
+            )
             try:
                 answer = await asyncio.wait_for(future, timeout=QUESTION_TIMEOUT_SECONDS)
             except TimeoutError:
                 self.question_manager.cancel(session_id)
-                return "Error: 用户长时间未回答；请自行决定下一步或在回复中说明需要该信息"
+                # 超时后通知前端，模型自行决定下一步
+                await emit("question_timeout", {"question_id": question_id})
+                return (
+                    "用户暂时未回答此问题。请在你的回复中告知用户可以随时回答这些问题，"
+                    "然后根据你已有的信息继续分析或创作。"
+                )
             await emit("user_answered", {"question_id": question_id, "answer": answer})
             return f"用户回答：{answer}"
 
@@ -275,8 +328,10 @@ class AgentRuntime:
         return [
             Tool(
                 "ask_user_question",
-                "Ask the user a question when you need their decision or missing "
-                "information to proceed with the task",
+                "Ask the user structured questions when you need their decision or "
+                "missing information to proceed. Supports multiple questions, each with "
+                "selectable options (single or multi-select) and custom answer. "
+                "The run suspends until the user answers, then resumes.",
                 ask_user_question,
             ),
             Tool(
@@ -332,8 +387,10 @@ class AgentRuntime:
         )
         try:
             model = self.model_override or self.model_router.select(agent_def.model)
+            child_session = child_run.session_id
             system_prompt = self.context_engine.build_system_prompt(
-                agent_def, skills, self.memory, self.workspace, tools=tools
+                agent_def, skills, self.memory, self.workspace,
+                tools=tools, memory_scope=self._user_scope(child_session),
             )
             agent: Agent[None, str] = Agent(
                 model,
@@ -489,15 +546,20 @@ class AgentRuntime:
             # 该 agent 本次 run 实际可用的全部工具：① agent/skills 声明的注册表工具
             # ② 会话级 todo 工具 ③ 子代理派发工具（dispatch_agent）
             # ④ 元能力工具（ask_user_question / list_capabilities，每 run 自动挂载）
+            # ⑤ 会话级记忆工具（remember/recall，按 user 隔离）
             run_tools = [
                 *tools,
                 *self._make_todo_tools(session_id, emit),
                 self._make_dispatch_tool(run, emit),
                 *self._make_meta_tools(run, emit),
+                self._make_remember_tool(session_id),
+                self._make_recall_tool(session_id),
             ]
-            # system prompt 中注入能力面（工具清单），让模型知道自己"能做什么"
+            # system prompt 中注入能力面（工具清单）+ 用户隔离的记忆
+            user_scope = self._user_scope(session_id)
             system_prompt = self.context_engine.build_system_prompt(
-                agent_def, skills, self.memory, self.workspace, tools=run_tools
+                agent_def, skills, self.memory, self.workspace,
+                tools=run_tools, memory_scope=user_scope,
             )
 
             agent: Agent[None, str] = Agent(

@@ -8,7 +8,7 @@ returned content.
 
 import httpx
 
-from guard_arch.core.tool import Tool
+from guard_arch.core.tool import Tool, report_progress
 
 # 响应体截断上限：避免超长页面灌爆模型上下文
 MAX_RESPONSE_CHARS = 4000
@@ -54,9 +54,11 @@ def make_web_tools() -> list[Tool]:
         url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+                await report_progress(f"正在搜索：{query}")
                 resp = await client.get(url, headers={"User-Agent": "guard-arch/0.1"})
         except httpx.HTTPError as exc:
             return f"Error: search failed: {exc}"
+        await report_progress("已获取结果页，正在解析", f"响应 {len(resp.text)} 字符")
         results = _parse_ddg_results(resp.text)
         if not results:
             return f"no results for {query!r}"
@@ -66,13 +68,30 @@ def make_web_tools() -> list[Tool]:
         """Fetch a URL over HTTP(S) and return the response body as text.
         Use when you need external or realtime information (public web pages,
         public HTTP APIs) that is not in your context or memory."""
+        chunks: list[str] = []
+        received = 0
+        last_reported = -1024  # 首个 chunk 必定触发一次进度上报
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-                resp = await client.get(url, headers={"User-Agent": "guard-arch/0.1"})
+                await report_progress(f"正在请求：{url}")
+                async with client.stream(
+                    "GET", url, headers={"User-Agent": "guard-arch/0.1"}
+                ) as resp:
+                    await report_progress(f"已建立连接（HTTP {resp.status_code}），正在接收")
+                    async for chunk in resp.aiter_text():
+                        chunks.append(chunk)
+                        received += len(chunk)
+                        # 每约 1KB 上报一次进度（携带最新片段供 UI 展示中间结果）；
+                        # 达到截断上限即停止接收，不再浪费带宽
+                        if received - last_reported >= 1024:
+                            last_reported = received
+                            await report_progress(f"已接收 {received} 字符", chunk)
+                        if received >= MAX_RESPONSE_CHARS:
+                            break
         except httpx.HTTPError as exc:
             # 网络层失败以 Error: 文本返回给模型，让它据此调整策略（换 URL/说明限制）
             return f"Error: request failed: {exc}"
-        text = resp.text
+        text = "".join(chunks)
         if len(text) > MAX_RESPONSE_CHARS:
             text = text[:MAX_RESPONSE_CHARS] + "\n...[truncated]"
         return text

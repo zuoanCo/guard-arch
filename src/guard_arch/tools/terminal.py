@@ -1,34 +1,47 @@
 """Terminal tool. Commands run in the workspace directory; the permission
 engine gates execution before this handler is invoked."""
 
-import subprocess
+import asyncio
 
-from guard_arch.core.tool import Tool
+from guard_arch.core.tool import Tool, report_progress
 from guard_arch.core.workspace import Workspace
 
 MAX_OUTPUT_CHARS = 30_000
 
 
 def make_terminal_tools(workspace: Workspace) -> list[Tool]:
-    def run_command(command: str, timeout: int = 60) -> str:
+    async def run_command(command: str, timeout: int = 60) -> str:
         """Run a shell command in the workspace directory and return its output."""
         timeout = max(1, min(int(timeout), 300))
         try:
-            proc = subprocess.run(
+            proc = await asyncio.create_subprocess_shell(
                 command,
-                shell=True,
                 cwd=workspace.root,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
             )
-        except subprocess.TimeoutExpired:
-            return f"Error: command timed out after {timeout}s"
         except OSError as exc:
             return f"Error: {exc}"
-        output = (proc.stdout or "") + (proc.stderr or "")
+
+        await report_progress(f"命令已启动：{command}")
+        lines: list[str] = []
+
+        async def read_output() -> None:
+            assert proc.stdout is not None
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                lines.append(line)
+                # 每行输出都上报进度（携带该行内容供 UI 实时展示）
+                await report_progress(f"运行中（已输出 {len(lines)} 行）", line)
+
+        try:
+            await asyncio.wait_for(read_output(), timeout=timeout)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return f"Error: command timed out after {timeout}s"
+        await proc.wait()
+        output = "\n".join(lines)
         if len(output) > MAX_OUTPUT_CHARS:
             output = output[:MAX_OUTPUT_CHARS] + f"\n... [truncated at {MAX_OUTPUT_CHARS} chars]"
         return f"exit_code={proc.returncode}\n{output.strip()}"

@@ -12,11 +12,34 @@ Production-grade fields:
 
 import inspect
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
 # 验证器签名：(调用参数, 工具输出) -> 验证结论文本（None 表示无需说明）
 Verifier = Callable[[dict[str, Any], str], str | None | Awaitable[str | None]]
+
+# 进度上报回调签名：(状态说明, 部分数据) -> None
+ProgressReporter = Callable[[str, str | None], Awaitable[None]]
+
+# 当前工具调用的进度上报通道（由 Runtime 派发层注入）。
+# 用 ContextVar 而非 handler 参数传递：pydantic-ai 会从 handler 签名派生工具的
+# input schema，任何额外参数都会泄露给模型；ContextVar 对 schema 完全不可见。
+_progress_reporter: ContextVar[ProgressReporter | None] = ContextVar(
+    "tool_progress_reporter", default=None
+)
+
+
+async def report_progress(note: str, data: str | None = None) -> None:
+    """工具内部上报执行进度（开始 → 进行中 → 结束生命周期的"进行中"环节）。
+
+    note: 人可读的状态说明（如"已建立连接""已接收 2.0 KB"）。
+    data: 可选的部分数据（如已抓取的内容片段），供 UI 展示中间结果。
+    无注入通道时（单测直接调 handler 等场景）静默为空操作。
+    """
+    reporter = _progress_reporter.get()
+    if reporter is not None:
+        await reporter(note, data)
 
 
 @dataclass

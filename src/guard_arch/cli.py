@@ -25,6 +25,8 @@ class CLIContext:
     session_id: str = "default"
     model_role: str | None = None
     streamed_text: str = field(default="", repr=False)
+    # thinking 流是否正在展开（用于结束时补换行）
+    thinking_open: bool = field(default=False, repr=False)
 
 
 HELP_TEXT = """\
@@ -186,32 +188,56 @@ def make_approval_handler(interactive: bool):
 
 
 def wire_display(ctx: CLIContext) -> None:
+    def close_thinking() -> None:
+        if ctx.thinking_open:
+            console.print()
+            ctx.thinking_open = False
+
+    def on_thinking(event: Event) -> None:
+        """思考过程流式展示：弱化（dim）样式，首个增量前打印标记行。"""
+        delta = event.data.get("delta", "")
+        if not delta:
+            return
+        if not ctx.thinking_open:
+            console.print("\n[dim italic]💭 思考 › [/dim italic]", end="")
+            ctx.thinking_open = True
+        console.print(delta, end="", style="dim italic", highlight=False, markup=False)
+
     def on_message_delta(event: Event) -> None:
+        close_thinking()
         delta = event.data.get("delta", "")
         ctx.streamed_text += delta
         console.print(delta, end="", highlight=False, markup=False)
 
     def on_tool_call(event: Event) -> None:
+        close_thinking()
         console.print(
             f"\n[green]✓[/green] [cyan]{event.data['tool']}[/cyan] "
             f"[dim]{summarize_args(event.data.get('args', {}))}[/dim]"
         )
+
+    def on_tool_progress(event: Event) -> None:
+        console.print(f"  [dim]├─ {event.data.get('note', '')}[/dim]")
 
     def on_tool_result(event: Event) -> None:
         status = "[green]ok[/green]" if event.data.get("ok") else "[red]failed[/red]"
         console.print(f"  [dim]└─ {status}[/dim]")
 
     def on_error(event: Event) -> None:
+        close_thinking()
         console.print(f"\n[red]错误: {event.data.get('error')}[/red]")
 
+    ctx.runtime.bus.subscribe("thinking", on_thinking)
     ctx.runtime.bus.subscribe("message_delta", on_message_delta)
     ctx.runtime.bus.subscribe("tool_call", on_tool_call)
+    ctx.runtime.bus.subscribe("tool_progress", on_tool_progress)
     ctx.runtime.bus.subscribe("tool_result", on_tool_result)
     ctx.runtime.bus.subscribe("error", on_error)
 
 
 async def run_turn(ctx: CLIContext, message: str) -> bool:
     ctx.streamed_text = ""
+    ctx.thinking_open = False
     result = await ctx.runtime.run(
         message,
         agent_id=ctx.agent_id,

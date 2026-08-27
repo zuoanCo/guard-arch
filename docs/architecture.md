@@ -51,7 +51,7 @@
 | 十一/十二、Context Engine | `core/context.py`：system prompt = base + agent instructions + **能力清单（工具定义）** + skills + **项目指令（工作区 GUARD.md/AGENTS.md/CLAUDE.md 自动注入）** + memory + environment（时间/系统/工作区状态），按 token 预算截断可选段 |
 | 十三/十四、Model Router | `core/model.py` + `config/models.yaml`：角色 → provider；openai 兼容 / anthropic / google / test；缺 key 报友好错误 |
 | 十五、Agent Loop | PydanticAI 负责底层 loop；Runtime 管 Task/Run/Context/Permission/Skill/Memory/Tool/事件/持久化 |
-| 十六、Event Bus | `events/bus.py`：同步+异步订阅，事件 agent_started / message_delta / tool_call / tool_result / permission_required / agent_finished / error / todo_updated / subagent_started / subagent_finished |
+| 十六、Event Bus | `events/bus.py`：同步+异步订阅，事件 agent_started / thinking / message_delta / tool_call / tool_progress / tool_result / permission_required / agent_finished / error / todo_updated / subagent_started / subagent_finished |
 | 子代理（subagent） | `runtime.py` 的 `dispatch_agent` 工具：主代理可把自包含子任务派给注册表中的另一个 agent；子代理在隔离上下文（无父历史）中独立运行，仅最终文本结论返回主代理；子代理不可再派发（深度 1 上限），工具调用同样过权限与事件 |
 | 任务清单（todo） | `core/plan.py` + 每 run 注入的 `todo_write`/`todo_read` 工具：agent 用 JSON 数组整体重写任务列表（pending/in_progress/completed），用于多步任务的规划与追踪；写入时发 `todo_updated` 事件 |
 | 会话压缩（compaction） | `core/compact.py`：run 前检查历史渲染文本的估算 token，超阈值（默认 8000，可经 `compaction_threshold_tokens` 配置）时由模型一次性摘要旧消息（保留末尾最近 6 条原文），压缩后历史 = 摘要消息 + 最近原文，发 `history_compacted` 事件 |
@@ -61,8 +61,8 @@
 
 ## 关键机制
 
-- **工具派发链**：pydantic-ai 工具调用 → Runtime 包装器（`functools.wraps` 保留原始签名以生成 schema）→ 发 `tool_call` 事件 → PermissionEngine（ask 时发 `permission_required` 并回调 CLI 询问）→ 执行 handler（文件类工具内部再过 Workspace 沙箱）→ 发 `tool_result` 事件。工具异常以 `Error: ...` 字符串返回给模型，不会中断 run。
-- **流式**：`agent.run(event_stream_handler=...)` 接收 pydantic-ai 的 `PartDeltaEvent(TextPartDelta)` → `message_delta` 事件 → CLI 实时打印；结尾打印未流式输出的剩余文本。
+- **工具派发链与生命周期**：pydantic-ai 工具调用 → Runtime 包装器（`functools.wraps` 保留原始签名以生成 schema）→ 发 `tool_call` 事件（开始）→ PermissionEngine（ask 时发 `permission_required` 并回调 CLI 询问）→ 执行 handler（文件类工具内部再过 Workspace 沙箱），执行中工具经 `report_progress()`（`core/tool.py`，ContextVar 注入、不污染 input schema）发 `tool_progress` 事件（进行中，携带状态说明 note 与部分数据 data，如 web_fetch 的已接收片段、run_command 的逐行输出）→ 发 `tool_result` 事件（结束，最终结果）。工具异常以 `Error: ...` 字符串返回给模型，不会中断 run。
+- **流式**：`agent.run(event_stream_handler=...)` 接收 pydantic-ai 的 `PartDeltaEvent(TextPartDelta)` → `message_delta` 事件 → CLI 实时打印；框架思考阶段（`core/think.py`，**默认开启**，YAML `thinking: false` 关闭，失败自动降级不阻断主执行）同样以流式增量发 `thinking` 事件（非流式模型兜底一次性下发全文）；结尾打印未流式输出的剩余文本。
 - **会话持久化**：`result.all_messages()` 经 `ModelMessagesTypeAdapter` 序列化存入 `session_state` 表，同 session 下次运行恢复。
 - **MCP 优雅降级**：`config/mcp.json` 缺失 → 跳过；配置错误或 server 构建失败 → warning 且不影响启动；工具调用失败经 `process_tool_call` 包装成错误文本返回模型，MCP 工具同样受 PermissionEngine 管控（`mcp:<tool>` 规则）。
 

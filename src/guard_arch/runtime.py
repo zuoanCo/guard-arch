@@ -33,7 +33,7 @@ from guard_arch.core.rules import RulesRegistry
 from guard_arch.core.run import Run, RunManager, RunStatus
 from guard_arch.core.skill import SkillManifest, SkillRegistry
 from guard_arch.core.think import think as run_thinking
-from guard_arch.core.tool import Tool, ToolRegistry
+from guard_arch.core.tool import Tool, ToolRegistry, _progress_reporter
 from guard_arch.core.workspace import Workspace
 from guard_arch.events.bus import Event, EventBus
 from guard_arch.mcp.client import MCPLoader
@@ -407,9 +407,10 @@ class AgentRuntime:
         try:
             model = self.model_override or self.model_router.select(model_role or agent_def.model)
 
-            # 框架思考阶段（agent YAML 里 thinking: true 才启用）：
+            # 框架思考阶段（默认开启，agent YAML 里 thinking: false 才关闭）：
             # 先让模型针对需求+能力面做一次分析（harness thinking，区别于模型内部思维链），
-            # 分析作为 thinking 事件下发，并注入主执行输入指导后续 tool_call/text
+            # 分析以流式增量作为 thinking 事件下发，并注入主执行输入指导后续 tool_call/text。
+            # 思考阶段失败（模型不可用/返回异常）不阻断主执行——降级为无思考直接执行。
             thinking_note = ""
             if agent_def.thinking:
                 capabilities = "\n".join(f"- {t.name}: {t.description}" for t in tools)
@@ -419,11 +420,27 @@ class AgentRuntime:
                     from guard_arch.core.compact import render_messages
 
                     context = render_messages(history[-6:])
-                analysis = await run_thinking(
-                    message, model, capabilities=capabilities, context=context
-                )
-                await emit("thinking", {"delta": analysis})
-                thinking_note = analysis
+
+                streamed = False
+
+                async def on_thinking_delta(delta: str) -> None:
+                    nonlocal streamed
+                    streamed = True
+                    await emit("thinking", {"delta": delta})
+
+                try:
+                    thinking_note = await run_thinking(
+                        message,
+                        model,
+                        capabilities=capabilities,
+                        context=context,
+                        on_delta=on_thinking_delta,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 思考阶段失败降级，不影响主执行
+                    logger.warning("thinking phase failed, continuing without it: %s", exc)
+                # 兜底：一条增量都没流出来（非流式模型/被替换的实现）时一次性下发全文
+                if thinking_note and not streamed:
+                    await emit("thinking", {"delta": thinking_note})
 
             # 需求分析门禁（agent YAML 里 intake: true 才启用）：
             # 先做一次结构化分析调用，结果硬性分支执行路径——
@@ -677,9 +694,22 @@ class AgentRuntime:
                     {"tool": tool.name, "call_id": call_id, "ok": False, "output": output},
                 )
                 return output
-            output, ok = await self._execute_with_retry(tool, emit, call_id, *args, **kwargs)
-            if ok:
-                output = await self._verify_result(tool, emit, call_id, kwargs, output)
+            # 工具生命周期：tool_call（开始）→ tool_progress（进行中，可多次，
+            # 携带状态说明与部分数据）→ tool_result（结束，最终结果）。
+            # 进度通道经 ContextVar 注入，不出现在工具的 input schema 里。
+            async def report(note: str, data: str | None = None) -> None:
+                payload: dict[str, Any] = {"tool": tool.name, "call_id": call_id, "note": note}
+                if data:
+                    payload["data"] = data[:1000]
+                await emit("tool_progress", payload)
+
+            token = _progress_reporter.set(report)
+            try:
+                output, ok = await self._execute_with_retry(tool, emit, call_id, *args, **kwargs)
+                if ok:
+                    output = await self._verify_result(tool, emit, call_id, kwargs, output)
+            finally:
+                _progress_reporter.reset(token)
             await emit(
                 "tool_result",
                 {"tool": tool.name, "call_id": call_id, "ok": ok, "output": output[:2000]},

@@ -14,11 +14,24 @@ def _get_web_fetch():
     return _get_tool("web_fetch")
 
 
-async def test_web_fetch_returns_response_text(monkeypatch: pytest.MonkeyPatch):
-    """web_fetch fetches the given URL and returns the body text for the model to reason over."""
+def _fake_streaming_client(text: str | None = None, error: Exception | None = None):
+    """构造支持流式接口（stream + aiter_text）的 FakeClient；error 时连接即抛错。"""
 
-    class FakeResponse:
-        text = '{"weather": "sunny", "temp": 25}'
+    class FakeStreamResponse:
+        status_code = 200
+
+        def __init__(self, body: str):
+            self._body = body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def aiter_text(self):
+            # 模拟分块到达（web_fetch 据此产生进行中进度）
+            yield self._body
 
     class FakeClient:
         def __init__(self, **kwargs):
@@ -30,11 +43,21 @@ async def test_web_fetch_returns_response_text(monkeypatch: pytest.MonkeyPatch):
         async def __aexit__(self, *args):
             return False
 
-        async def get(self, url, headers=None):
+        def stream(self, method, url, headers=None):
             assert url.startswith("https://")
-            return FakeResponse()
+            if error is not None:
+                raise error
+            return FakeStreamResponse(text or "")
 
-    monkeypatch.setattr("guard_arch.tools.web.httpx.AsyncClient", FakeClient)
+    return FakeClient
+
+
+async def test_web_fetch_returns_response_text(monkeypatch: pytest.MonkeyPatch):
+    """web_fetch fetches the given URL and returns the body text for the model to reason over."""
+    monkeypatch.setattr(
+        "guard_arch.tools.web.httpx.AsyncClient",
+        _fake_streaming_client(text='{"weather": "sunny", "temp": 25}'),
+    )
 
     result = await _get_web_fetch().handler("https://api.example.com/weather?city=beijing")
     assert "sunny" in result
@@ -45,20 +68,10 @@ async def test_web_fetch_network_error_returns_error_text(monkeypatch: pytest.Mo
     """Network failure returns an 'Error: ...' string (feedback to the model, not a crash)."""
     import httpx
 
-    class FailingClient:
-        def __init__(self, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return False
-
-        async def get(self, url, headers=None):
-            raise httpx.ConnectError("unreachable")
-
-    monkeypatch.setattr("guard_arch.tools.web.httpx.AsyncClient", FailingClient)
+    monkeypatch.setattr(
+        "guard_arch.tools.web.httpx.AsyncClient",
+        _fake_streaming_client(error=httpx.ConnectError("unreachable")),
+    )
 
     result = await _get_web_fetch().handler("https://unreachable.example.com")
     assert result.startswith("Error:")
@@ -66,28 +79,38 @@ async def test_web_fetch_network_error_returns_error_text(monkeypatch: pytest.Mo
 
 async def test_web_fetch_truncates_long_responses(monkeypatch: pytest.MonkeyPatch):
     """Over-long bodies are truncated so they don't flood the model context."""
-
-    class FakeResponse:
-        text = "x" * 10000
-
-    class FakeClient:
-        def __init__(self, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return False
-
-        async def get(self, url, headers=None):
-            return FakeResponse()
-
-    monkeypatch.setattr("guard_arch.tools.web.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        "guard_arch.tools.web.httpx.AsyncClient",
+        _fake_streaming_client(text="x" * 10000),
+    )
 
     result = await _get_web_fetch().handler("https://example.com/big")
     assert len(result) < 10000
     assert "truncated" in result
+
+
+async def test_web_fetch_reports_progress(monkeypatch: pytest.MonkeyPatch):
+    """web_fetch 执行中上报进度：连接建立 + 内容接收（携带部分数据）。"""
+    from guard_arch.core.tool import _progress_reporter
+
+    monkeypatch.setattr(
+        "guard_arch.tools.web.httpx.AsyncClient",
+        _fake_streaming_client(text="hello streaming world"),
+    )
+    notes: list[str] = []
+
+    async def report(note: str, data: str | None = None) -> None:
+        notes.append(note)
+
+    token = _progress_reporter.set(report)
+    try:
+        result = await _get_web_fetch().handler("https://example.com/page")
+    finally:
+        _progress_reporter.reset(token)
+
+    assert "hello streaming world" in result
+    assert any("已建立连接" in n for n in notes)
+    assert any("已接收" in n for n in notes)
 
 
 # ---------- web_search ----------
